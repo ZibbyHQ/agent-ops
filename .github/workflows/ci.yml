@@ -45,6 +45,24 @@ jobs:
           version: v1.61.0
           args: --timeout=5m
 
+  mcp-bridge:
+    name: mcp-bridge (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["18", "20", "22"]
+    defaults:
+      run:
+        working-directory: clients/mcp-bridge
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: node --version
+      - run: npm test
+
   docker:
     name: docker build
     runs-on: ubuntu-latest

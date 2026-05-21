@@ -1,0 +1,39 @@
+{
+  "name": "agent-ops-mcp",
+  "version": "0.1.0",
+  "description": "stdio MCP bridge for connecting local AI agents (Claude Code, Cursor, Codex, Gemini) to a remote agent-ops daemon",
+  "type": "module",
+  "main": "index.js",
+  "bin": {
+    "agent-ops-mcp": "index.js"
+  },
+  "files": [
+    "index.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test --test-reporter=spec index.test.js"
+  },
+  "keywords": [
+    "mcp",
+    "agent-ops",
+    "claude",
+    "cursor",
+    "codex",
+    "gemini",
+    "devops",
+    "stdio-bridge"
+  ],
+  "license": "Apache-2.0",
+  "author": "Zibby Lab",
+  "homepage": "https://github.com/ZibbyHQ/agent-ops",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ZibbyHQ/agent-ops.git",
+    "directory": "clients/mcp-bridge"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
