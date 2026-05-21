@@ -1,5 +1,7 @@
 # agent-ops roadmap
 
+> Reminder: **this is an experimental project**. The items below are research directions, not a delivery schedule. Order and scope will shift as we learn from running it.
+
 Numbered, not dated. Listed in roughly the order I expect to ship.
 
 ## v0.1 — single-host MVP (this release)

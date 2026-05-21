@@ -2,9 +2,12 @@
 
 > An autonomous DevOps engineer that lives next to your application.
 
+> ⚠️ **Experimental — DO NOT run on production hosts you can't afford to lose.**
+> This is a research project exploring "what if a small autonomous LLM agent acted as the operator of a single host?" It can run arbitrary shell commands on the box. The API, config schema, on-disk state format, and security model will all change. Pin to a commit if you depend on a specific behavior. We're publishing in the open so the design can be debated; we are NOT promising stability, support, or backwards compatibility at this stage.
+
 `agent-ops` is a small open-source daemon that wraps an LLM agent (Claude today; Codex / Gemini / Ollama on the roadmap) and runs scheduled + on-demand ops tasks on a host. Bring your own API key. Tell it what should be true, in natural language. It uses tools (shell, soon docker / kubectl / http) to keep things that way.
 
-**Status: alpha (v0.1).** Single-host MVP. The abstractions are cluster-ready (Node + Resource + event-log state) so v1.0 can grow into a Kubernetes-flavored multi-node pilot/worker design without rewrites.
+**Status: experimental (v0.1).** Single-host MVP. The abstractions are cluster-ready (Node + Resource + event-log state) so v1.0 *could* grow into a Kubernetes-flavored multi-node design — that's the hypothesis we're testing, not a delivery commitment.
 
 ## How it differs from neighboring tools
 
@@ -132,6 +135,23 @@ This is part of [Zibby](https://zibby.dev)'s open ecosystem. The Zibby control p
 PRs welcome. We require a [CLA](./CONTRIBUTING.md) for non-trivial contributions so the project stays cleanly Apache-2.0 licensable.
 
 For security reports, see [`SECURITY.md`](./SECURITY.md).
+
+## Experiment, not a product
+
+This repo is an active design experiment. Specifically we want to find out:
+
+1. **Does an LLM agent on a single host actually replace a human ops person for small workloads?** Or does it churn out plausible-looking actions that quietly drift state.
+2. **Is "natural language mission journal" a stable abstraction?** Or do users want stricter Resource specs (Kubernetes-CRD style)?
+3. **Where's the right line between in-process tools (`shell`) and outbound integrations (Slack, GitHub, …)?** And how does the agent learn that line.
+4. **How does the cluster shape land?** v0.1 reserves Node + Resource + event-log seams for a future Raft pilot/worker design — we want to know if that shape survives real multi-node usage.
+
+If those questions don't pan out, the project may pivot or shut down. If they do, v1.0 freezes a stable API.
+
+In the meantime:
+- Expect breaking changes between every minor version
+- Expect bugs in the agent's judgment, not just its code
+- Don't point this at anything you can't lose
+- Telemetry from your runs (when implemented) goes only to your own backend — we are not collecting anything
 
 ## License
 
