@@ -1,0 +1,31 @@
+name: Bug report
+description: Something that should work but doesn't
+labels: [bug]
+body:
+  - type: textarea
+    attributes:
+      label: What happened
+      description: One paragraph describing the bug.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Reproduction
+      description: Minimal steps. Config snippet helps a lot.
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: agent-ops version
+      placeholder: "0.1.0  (from `agent-opsd version`)"
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: OS / architecture
+      placeholder: "linux/amd64, Docker on Fargate"
+  - type: textarea
+    attributes:
+      label: Logs
+      description: Relevant lines from the daemon. Redact secrets.
+      render: text

@@ -1,0 +1,54 @@
+# agent-ops example configuration.
+#
+# Mount this at /etc/agent-ops/config.yaml in the container (or pass
+# --config /path/to/config.yaml to agent-opsd).
+
+state_dir: /var/lib/agent-ops
+
+agent:
+  provider: claude
+  model: claude-sonnet-4-6
+  api_key_env: ANTHROPIC_API_KEY    # env var read at startup
+  max_tool_calls_per_task: 25
+  task_timeout: 10m
+
+mcp:
+  listen_addr: ":7842"
+  # Bearer token is read from this env var if set; otherwise generated on
+  # first boot and persisted at <state_dir>/mcp.token.
+  token_env: AGENT_OPS_TOKEN
+
+# Optional first-run task. Runs ONCE on initial daemon boot — use this to
+# set up the host app (download binaries, seed DB, configure ports, etc.).
+# Subsequent restarts skip it; you can re-trigger via MCP agent_run_now.
+bootstrap:
+  name: initial_setup
+  prompt: |
+    You are setting up this host for the first time.
+    1. Check what's already installed.
+    2. Install + configure the target application per its README.
+    3. Verify the app is reachable on its expected port.
+    4. Report a one-paragraph summary of what you did.
+  tools: [shell]
+
+# Recurring tasks. Each one fires on its cron expression. Edit names + prompts
+# to taste — agent-ops will reconcile on restart.
+schedules:
+  - name: hourly_health_check
+    cron: "0 * * * *"
+    prompt: |
+      Verify the application is responding on its expected port.
+      If not, restart the process and re-verify. Report status.
+    tools: [shell]
+
+  - name: weekly_upgrade
+    cron: "0 9 * * 1"        # Mondays 09:00 UTC
+    prompt: |
+      Check upstream for a new release of the host application.
+      If one exists:
+        1. Snapshot current state (or note rollback procedure).
+        2. Pull the new version.
+        3. Run smoke tests.
+        4. If anything fails, roll back and explain what went wrong.
+        5. If everything passes, summarize what changed.
+    tools: [shell]

@@ -1,0 +1,32 @@
+# Binaries
+bin/
+dist/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test artifacts
+*.test
+*.out
+coverage.txt
+
+# Local state
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+/var/
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Local config that may carry secrets
+.env
+.env.local
+config.local.yaml
+
+# Go
+vendor/

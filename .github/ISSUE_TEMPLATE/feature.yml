@@ -1,0 +1,20 @@
+name: Feature request
+description: Propose a new capability or improvement
+labels: [enhancement]
+body:
+  - type: textarea
+    attributes:
+      label: What
+      description: One paragraph describing the feature.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Why
+      description: What's the user need? What would you do with it?
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you've thought through, even if you rejected them.
