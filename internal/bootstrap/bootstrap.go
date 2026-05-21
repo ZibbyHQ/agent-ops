@@ -17,6 +17,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/ZibbyHQ/agent-ops/internal/config"
 	"github.com/ZibbyHQ/agent-ops/internal/scheduler"
@@ -96,15 +98,41 @@ func MaybeRunFirstRun(
 
 	// Trigger one synchronous run. Pass through the scheduler so the same
 	// path is used as RunNow + tests.
-	_, err := sched.RunNow(ctx, t.Name, t.Prompt)
+	run, err := sched.RunNow(ctx, t.Name, t.Prompt)
 	if err != nil {
 		// Don't write the marker on failure — operator may want to retry
 		// once they fix what was broken.
 		return fmt.Errorf("bootstrap: first-run task failed: %w", err)
 	}
+
+	// Auto-write the agent's first long-term fact: bootstrap completed +
+	// a digest of what the agent itself reported doing. This is what gives
+	// the daemon any clue at all about itself on subsequent restarts; the
+	// alternative is the agent re-discovering its own environment every
+	// boot via shell probes.
+	summary := strings.TrimSpace(run.Summary)
+	if summary == "" {
+		summary = "(no summary returned by bootstrap agent)"
+	}
+	if _, addErr := store.AddFact(ctx, "bootstrap",
+		"Initial setup completed at "+time.Now().UTC().Format(time.RFC3339)+
+			": "+truncate(summary, 600)); addErr != nil {
+		// Non-fatal — bootstrap succeeded, just couldn't write the fact.
+		// Log into the run's log so it's discoverable.
+		_ = store.AppendRunLog(ctx, run.ID, 99999, "warn",
+			"could not persist bootstrap fact: "+addErr.Error())
+	}
+
 	return os.WriteFile(marker, []byte("ok"), 0o600)
 	// the marker has no business value beyond "we've been here" — its
 	// presence alone keeps subsequent restarts idempotent.
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 // We use task.TriggerBootstrap directly nowhere in this file (RunNow tags it

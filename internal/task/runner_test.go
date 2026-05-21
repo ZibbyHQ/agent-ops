@@ -178,6 +178,70 @@ func TestRunner_RefusesConcurrentSameTask(t *testing.T) {
 	wg.Wait()
 }
 
+func TestRunner_MissionPrependedToSystemPrompt(t *testing.T) {
+	ctx := context.Background()
+	st := openState(t)
+
+	// Seed a mission so the runner has something to inject.
+	if err := st.SetStatement(ctx, "I steward the OpenDesign instance. Always dry-run upgrades."); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AddFact(ctx, "bootstrap", "OpenDesign installed via apt at /usr/local/bin/opendesign"); err != nil {
+		t.Fatal(err)
+	}
+
+	var capturedSystem string
+	d := &fakeDriver{
+		name: "fake",
+		run: func(_ context.Context, req driver.Request) (driver.Result, error) {
+			capturedSystem = req.SystemPrompt
+			return driver.Result{FinalMessage: "ok"}, nil
+		},
+	}
+	r := NewRunner(d, tool.NewRegistry(), st)
+	_, _, err := r.Run(ctx, Spec{Name: "weekly", Trigger: TriggerManual, Prompt: "check upstream"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(capturedSystem, "I steward the OpenDesign instance") {
+		t.Fatalf("system prompt missing mission statement:\n%s", capturedSystem)
+	}
+	if !strings.Contains(capturedSystem, "OpenDesign installed via apt") {
+		t.Fatalf("system prompt missing facts:\n%s", capturedSystem)
+	}
+	if !strings.Contains(capturedSystem, "== MISSION ==") {
+		t.Fatalf("system prompt missing MISSION header:\n%s", capturedSystem)
+	}
+	if !strings.Contains(capturedSystem, "== BASE GUIDANCE ==") {
+		t.Fatalf("system prompt missing BASE GUIDANCE separator:\n%s", capturedSystem)
+	}
+}
+
+func TestRunner_NoMission_UsesBaseSystemPromptOnly(t *testing.T) {
+	ctx := context.Background()
+	st := openState(t)
+
+	var capturedSystem string
+	d := &fakeDriver{
+		name: "fake",
+		run: func(_ context.Context, req driver.Request) (driver.Result, error) {
+			capturedSystem = req.SystemPrompt
+			return driver.Result{FinalMessage: "ok"}, nil
+		},
+	}
+	r := NewRunner(d, tool.NewRegistry(), st)
+	_, _, err := r.Run(ctx, Spec{Name: "t", Trigger: TriggerManual, Prompt: "p"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(capturedSystem, "== MISSION ==") {
+		t.Fatalf("MISSION header should not appear when no mission is set:\n%s", capturedSystem)
+	}
+	if !strings.Contains(capturedSystem, defaultSystemPrompt) {
+		t.Fatal("base system prompt should still be present when no mission set")
+	}
+}
+
 func TestRunner_RejectsEmptyName(t *testing.T) {
 	st := openState(t)
 	r := NewRunner(&fakeDriver{name: "fake", run: func(context.Context, driver.Request) (driver.Result, error) {

@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -61,6 +62,48 @@ to satisfy them. Be concise. Prefer read-only inspection before mutating.
 When a tool fails, recover or report — do not retry blindly. End the run
 when the user instruction is satisfied OR when you genuinely cannot make
 further progress; explain either outcome in plain English.`
+
+// composeSystemPrompt prepends the instance Mission (charter + known facts)
+// to the runner's base system prompt. This is what gives the agent its
+// "I know who I am and what I've done" sense across restarts — every task
+// run reads the current Mission so the prompt is always fresh.
+//
+// Format kept human-readable so a sysadmin debugging an agent run can paste
+// the exact prompt into a Claude UI and reproduce the behavior.
+func composeSystemPrompt(base string, m state.Mission) string {
+	if m.Statement == "" && len(m.Facts) == 0 {
+		return base
+	}
+	var b strings.Builder
+	b.WriteString("You are agent-ops stewarding one specific instance.\n\n")
+	if m.Statement != "" {
+		b.WriteString("== MISSION ==\n")
+		b.WriteString(m.Statement)
+		b.WriteString("\n\n")
+	}
+	if len(m.Facts) > 0 {
+		b.WriteString("== KNOWN FACTS (oldest first) ==\n")
+		// Trim to last 40 facts in-prompt — full list lives in DB; this
+		// keeps the prompt context-bounded for cheaper models too.
+		facts := m.Facts
+		if len(facts) > 40 {
+			facts = facts[len(facts)-40:]
+		}
+		for _, f := range facts {
+			b.WriteString("- [")
+			b.WriteString(f.TS.Format("2006-01-02"))
+			b.WriteString("] (")
+			b.WriteString(f.Source)
+			b.WriteString(") ")
+			b.WriteString(f.Fact)
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("== BASE GUIDANCE ==\n")
+	b.WriteString(base)
+	return b.String()
+}
 
 // Trigger is the entry point — schedule | manual | bootstrap. Always returns
 // the run id (even on failure) so callers can subscribe to logs.
@@ -116,8 +159,17 @@ func (r *Runner) Run(ctx context.Context, spec Spec) (state.TaskRun, driver.Resu
 
 	sink := &runLogSink{state: r.State, runID: runID}
 
+	// Read mission fresh on every run — user / earlier ticks may have changed
+	// it. Failures here degrade gracefully: missing mission == no extra
+	// prompt context, not a fatal run failure.
+	mission, missionErr := r.State.GetMission(ctx)
+	if missionErr != nil {
+		_ = sink.Log(ctx, "warn", "could not read instance mission: "+missionErr.Error())
+	}
+	systemPrompt := composeSystemPrompt(r.SystemPrompt, mission)
+
 	dReq := driver.Request{
-		SystemPrompt: r.SystemPrompt,
+		SystemPrompt: systemPrompt,
 		UserPrompt:   spec.Prompt,
 		Tools:        r.Tools.Subset(spec.Tools),
 		MaxToolCalls: r.MaxToolCalls,

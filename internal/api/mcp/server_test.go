@@ -247,6 +247,85 @@ func TestHostToolPassthrough(t *testing.T) {
 	}
 }
 
+func TestMissionFlow_SetGetRemember(t *testing.T) {
+	srv, store, _ := setup(t)
+
+	// 1. set a mission statement
+	var setRes struct {
+		Content []struct{ Text string }
+		IsError bool
+	}
+	decodeResult(t, rpcCall(t, srv.URL, "tools/call", map[string]any{
+		"name":      "agent_set_mission",
+		"arguments": map[string]any{"statement": "I steward the OpenDesign instance."},
+	}), &setRes)
+	if setRes.IsError {
+		t.Fatalf("set_mission error: %s", setRes.Content[0].Text)
+	}
+
+	// 2. add a fact
+	var rememberRes struct {
+		Content []struct{ Text string }
+		IsError bool
+	}
+	decodeResult(t, rpcCall(t, srv.URL, "tools/call", map[string]any{
+		"name": "agent_remember_fact",
+		"arguments": map[string]any{
+			"fact":   "Postgres 16 listening on :5432, password in /etc/myapp/db.conf",
+			"source": "bootstrap",
+		},
+	}), &rememberRes)
+	if rememberRes.IsError {
+		t.Fatalf("remember_fact error: %s", rememberRes.Content[0].Text)
+	}
+
+	// 3. read it back
+	var getRes struct {
+		Content []struct{ Text string }
+		IsError bool
+	}
+	decodeResult(t, rpcCall(t, srv.URL, "tools/call", map[string]any{
+		"name":      "agent_get_mission",
+		"arguments": map[string]any{},
+	}), &getRes)
+	text := getRes.Content[0].Text
+	if !strings.Contains(text, "I steward the OpenDesign instance.") {
+		t.Fatalf("statement missing from get_mission output:\n%s", text)
+	}
+	if !strings.Contains(text, "Postgres 16") {
+		t.Fatalf("fact missing from get_mission output:\n%s", text)
+	}
+
+	// 4. underlying store reflects the same — belt + suspenders so a future
+	// MCP regression that silently fails to persist would be caught.
+	m, err := store.GetMission(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Statement == "" || len(m.Facts) == 0 {
+		t.Fatalf("store didn't persist mission: %+v", m)
+	}
+}
+
+func TestToolsList_IncludesMissionTools(t *testing.T) {
+	srv, _, _ := setup(t)
+	var got struct {
+		Tools []struct {
+			Name string `json:"name"`
+		} `json:"tools"`
+	}
+	decodeResult(t, rpcCall(t, srv.URL, "tools/list", map[string]any{}), &got)
+	names := map[string]struct{}{}
+	for _, t := range got.Tools {
+		names[t.Name] = struct{}{}
+	}
+	for _, want := range []string{"agent_get_mission", "agent_set_mission", "agent_remember_fact"} {
+		if _, ok := names[want]; !ok {
+			t.Errorf("mission tool %q missing from tools/list", want)
+		}
+	}
+}
+
 func TestHealthEndpoint(t *testing.T) {
 	srv, _, _ := setup(t)
 	resp, err := http.Get(srv.URL + "/healthz")

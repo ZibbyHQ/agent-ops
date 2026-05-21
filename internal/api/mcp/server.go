@@ -272,6 +272,12 @@ func (s *Server) handleToolsCall(w http.ResponseWriter, ctx context.Context, req
 		s.toolSetTask(w, ctx, req.ID, params.Arguments)
 	case "agent_get_task":
 		s.toolGetTask(w, ctx, req.ID, params.Arguments)
+	case "agent_get_mission":
+		s.toolGetMission(w, ctx, req.ID)
+	case "agent_set_mission":
+		s.toolSetMission(w, ctx, req.ID, params.Arguments)
+	case "agent_remember_fact":
+		s.toolRememberFact(w, ctx, req.ID, params.Arguments)
 	default:
 		writeJSONRPCError(w, req.ID, -32602, "no such tool: "+params.Name)
 	}
@@ -387,6 +393,60 @@ func (s *Server) toolGetTask(w http.ResponseWriter, ctx context.Context, id any,
 		return
 	}
 	s.respond(w, id, toolTextResult(mustEncodeJSON(t)))
+}
+
+// ─── Mission journal ───────────────────────────────────────────────────────
+
+func (s *Server) toolGetMission(w http.ResponseWriter, ctx context.Context, id any) {
+	m, err := s.store.GetMission(ctx)
+	if err != nil {
+		s.respond(w, id, toolErrorResult(err.Error()))
+		return
+	}
+	s.respond(w, id, toolTextResult(mustEncodeJSON(m)))
+}
+
+func (s *Server) toolSetMission(w http.ResponseWriter, ctx context.Context, id any, raw json.RawMessage) {
+	var args struct {
+		Statement string `json:"statement"`
+	}
+	if err := json.Unmarshal(raw, &args); err != nil {
+		writeJSONRPCError(w, id, -32602, "bad args: "+err.Error())
+		return
+	}
+	// Empty statement is intentionally allowed — used to clear a mission.
+	if err := s.store.SetStatement(ctx, args.Statement); err != nil {
+		s.respond(w, id, toolErrorResult(err.Error()))
+		return
+	}
+	s.respond(w, id, toolTextResult("ok"))
+}
+
+func (s *Server) toolRememberFact(w http.ResponseWriter, ctx context.Context, id any, raw json.RawMessage) {
+	var args struct {
+		Fact   string `json:"fact"`
+		Source string `json:"source"`
+	}
+	if err := json.Unmarshal(raw, &args); err != nil {
+		writeJSONRPCError(w, id, -32602, "bad args: "+err.Error())
+		return
+	}
+	if args.Fact == "" {
+		s.respond(w, id, toolErrorResult("fact is required"))
+		return
+	}
+	if args.Source == "" {
+		args.Source = "user" // MCP callers default to user-supplied
+	}
+	facts, err := s.store.AddFact(ctx, args.Source, args.Fact)
+	if err != nil {
+		s.respond(w, id, toolErrorResult(err.Error()))
+		return
+	}
+	s.respond(w, id, toolTextResult(mustEncodeJSON(map[string]any{
+		"added":       true,
+		"total_facts": len(facts),
+	})))
 }
 
 func (s *Server) toolSetTask(w http.ResponseWriter, ctx context.Context, id any, raw json.RawMessage) {
@@ -515,6 +575,22 @@ func builtinTools() []builtin {
 			name:        "agent_set_task",
 			description: "Create or update a scheduled task. Supply name, cron (e.g. '0 9 * * 1'), prompt, optional tools allowlist, optional enabled flag.",
 			schema:      `{"type":"object","properties":{"name":{"type":"string"},"cron":{"type":"string"},"prompt":{"type":"string"},"tools":{"type":"array","items":{"type":"string"}},"enabled":{"type":"boolean"}},"required":["name","cron","prompt"]}`,
+		},
+		// ── Mission journal ───────────────────────────────────────────────
+		{
+			name:        "agent_get_mission",
+			description: "Return the instance's mission journal: the natural-language charter set by the user, plus the list of facts the agent has learned over time. This is what the agent reads on every task run to know who it is and what it's been doing.",
+			schema:      `{"type":"object","properties":{}}`,
+		},
+		{
+			name:        "agent_set_mission",
+			description: "Replace the instance's mission statement (natural-language charter). Example: 'I steward the OpenDesign instance. Upgrades require dry-run; alert me at >80%% disk; never touch /etc/secrets.' Pass empty string to clear.",
+			schema:      `{"type":"object","properties":{"statement":{"type":"string"}},"required":["statement"]}`,
+		},
+		{
+			name:        "agent_remember_fact",
+			description: "Append one fact to the mission journal. Use for important context the agent should carry across runs (versions installed, ports in use, decisions made). source defaults to 'user'.",
+			schema:      `{"type":"object","properties":{"fact":{"type":"string"},"source":{"type":"string"}},"required":["fact"]}`,
 		},
 	}
 }

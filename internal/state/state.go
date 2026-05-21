@@ -124,6 +124,10 @@ func migrate(db *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("state: seed watermark: %w", err)
 	}
+	// Mission journal lives in its own file (mission.go) — same db handle.
+	if err := migrateMission(db); err != nil {
+		return err
+	}
 	return nil
 }
 
