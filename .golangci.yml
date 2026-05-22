@@ -9,11 +9,12 @@ linters:
     - staticcheck
     - unused
 
+# `defer x.Close()` / `defer tx.Rollback()` are universally treated as
+# cleanup noise — Close/Rollback returning an error after the work is
+# already done is not actionable. Excluding them via the issues.exclude
+# regex (matches the linter's formatted message text) is the simplest
+# project-wide fix.
 issues:
-  # `defer x.Close()` / `defer tx.Rollback()` are universally treated as
-  # cleanup noise — Close/Rollback returning an error after the work is
-  # already done isn't actionable. Explicitly excluding the pattern is
-  # the conventional Go fix (https://github.com/kisielk/errcheck#excluding-functions).
-  exclude-rules:
-    - linters: [errcheck]
-      source: '^\s*defer .*\.(Close|Rollback)\(\)'
+  exclude:
+    - 'Error return value of `[^`]+\.Close` is not checked'
+    - 'Error return value of `[^`]+\.Rollback` is not checked'
