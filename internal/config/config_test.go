@@ -104,6 +104,49 @@ schedules:
 	}
 }
 
+func TestParse_BootstrapPromptEnvOverride(t *testing.T) {
+	// AGENT_OPS_BOOTSTRAP_PROMPT is how the Zibby control plane injects a
+	// per-instance goal into a Fargate task without baking a new config.yaml
+	// per task. Two paths: synthesize a Bootstrap when config has none, and
+	// override an existing Bootstrap.Prompt when it does.
+	t.Setenv("AGENT_OPS_BOOTSTRAP_PROMPT", "install n8n on port 5678")
+
+	t.Run("synthesizes Bootstrap when config has none", func(t *testing.T) {
+		c, err := Parse(strings.NewReader(validYAML))
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		if c.Bootstrap == nil {
+			t.Fatal("Bootstrap should be synthesized from env var")
+		}
+		if c.Bootstrap.Prompt != "install n8n on port 5678" {
+			t.Errorf("Bootstrap.Prompt = %q", c.Bootstrap.Prompt)
+		}
+		if c.Bootstrap.Name != "bootstrap" {
+			t.Errorf("Bootstrap.Name = %q, want default 'bootstrap'", c.Bootstrap.Name)
+		}
+	})
+
+	t.Run("overrides existing Bootstrap.Prompt", func(t *testing.T) {
+		yaml := validYAML + `
+bootstrap:
+  name: initial_setup
+  prompt: "this should get overridden"
+  tools: [shell]
+`
+		c, err := Parse(strings.NewReader(yaml))
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		if c.Bootstrap.Prompt != "install n8n on port 5678" {
+			t.Errorf("env should win, got %q", c.Bootstrap.Prompt)
+		}
+		if c.Bootstrap.Name != "initial_setup" {
+			t.Errorf("existing Name should be preserved, got %q", c.Bootstrap.Name)
+		}
+	})
+}
+
 func TestParse_AllowsReservedTopLevelKeys(t *testing.T) {
 	// Future v0.x features should not break v0.1 config files.
 	yaml := validYAML + `

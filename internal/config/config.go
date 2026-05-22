@@ -136,6 +136,23 @@ func (c *Config) applyDefaults() {
 	if c.MCP.TokenEnv == "" {
 		c.MCP.TokenEnv = "AGENT_OPS_TOKEN"
 	}
+
+	// AGENT_OPS_BOOTSTRAP_PROMPT env override. The Zibby control plane sets
+	// this on the Fargate task at RunTask time so the per-instance goal
+	// ("install n8n on port 5678") ships as an env var instead of needing a
+	// custom config.yaml per task. If config.yaml already has a bootstrap
+	// section the env value wins; if it doesn't, we synthesize one with
+	// sensible defaults (shell tool only — agent picks what it needs).
+	if p := strings.TrimSpace(os.Getenv("AGENT_OPS_BOOTSTRAP_PROMPT")); p != "" {
+		if c.Bootstrap == nil {
+			c.Bootstrap = &Schedule{
+				Name:  "bootstrap",
+				Cron:  "@yearly",
+				Tools: []string{"shell"},
+			}
+		}
+		c.Bootstrap.Prompt = p
+	}
 }
 
 var validProviders = map[string]bool{

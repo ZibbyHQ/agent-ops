@@ -35,6 +35,12 @@ RUN apk add --no-cache ca-certificates tzdata busybox-extras curl \
 
 COPY --from=build /out/agent-opsd /usr/local/bin/agent-opsd
 
+# Bake the documented example config as the default so the image runs
+# without a mounted volume. Per-instance prompts come via the
+# AGENT_OPS_BOOTSTRAP_PROMPT env var (see internal/config/config.go).
+# Mount your own /etc/agent-ops/config.yaml at runtime to fully override.
+COPY config.example.yaml /etc/agent-ops/config.yaml
+
 USER agentops
 WORKDIR /home/agentops
 
