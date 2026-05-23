@@ -1,4 +1,4 @@
-# agent-ops-mcp
+# @zibby/agent-ops-mcp
 
 > stdio MCP bridge — connect a local AI agent (Claude Code, Cursor, OpenAI Codex CLI, Gemini CLI) to a remote agent-ops daemon.
 
@@ -17,7 +17,7 @@ You don't install this manually. Your AI agent installs it on demand via `npx -y
   "mcpServers": {
     "ops-my-opendesign": {
       "command": "npx",
-      "args": ["-y", "agent-ops-mcp"],
+      "args": ["-y", "@zibby/agent-ops-mcp"],
       "env": {
         "AGENT_OPS_URL": "https://my-instance.apps.zibby.app:7842/mcp",
         "AGENT_OPS_TOKEN": "ao_xxxxxxxx"
@@ -34,7 +34,7 @@ You don't install this manually. Your AI agent installs it on demand via `npx -y
   "mcpServers": {
     "ops-my-opendesign": {
       "command": "npx",
-      "args": ["-y", "agent-ops-mcp"],
+      "args": ["-y", "@zibby/agent-ops-mcp"],
       "env": {
         "AGENT_OPS_URL": "https://my-instance.apps.zibby.app:7842/mcp",
         "AGENT_OPS_TOKEN": "ao_xxxxxxxx"
@@ -49,7 +49,7 @@ You don't install this manually. Your AI agent installs it on demand via `npx -y
 ```toml
 [mcp_servers.ops-my-opendesign]
 command = "npx"
-args    = ["-y", "agent-ops-mcp"]
+args    = ["-y", "@zibby/agent-ops-mcp"]
 
 [mcp_servers.ops-my-opendesign.env]
 AGENT_OPS_URL   = "https://my-instance.apps.zibby.app:7842/mcp"
@@ -98,7 +98,7 @@ All 21 tests must pass before publish.
 
 ## Versioning
 
-`agent-ops-mcp@<x.y.z>` tracks the agent-ops daemon's API. The bridge is intentionally thin — it should keep working across daemon versions because all it does is forward bytes. We bump only on (rare) wire-protocol changes.
+`@zibby/agent-ops-mcp@<x.y.z>` tracks the agent-ops daemon's API. The bridge is intentionally thin — it should keep working across daemon versions because all it does is forward bytes. We bump only on (rare) wire-protocol changes.
 
 ## License
 

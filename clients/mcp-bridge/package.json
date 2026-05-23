@@ -1,5 +1,5 @@
 {
-  "name": "agent-ops-mcp",
+  "name": "@zibby/agent-ops-mcp",
   "version": "0.1.0",
   "description": "stdio MCP bridge for connecting local AI agents (Claude Code, Cursor, Codex, Gemini) to a remote agent-ops daemon",
   "type": "module",
