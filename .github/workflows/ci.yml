@@ -40,20 +40,16 @@ jobs:
         with:
           go-version: "1.24"
           cache: true
-      # Hydrate the module cache + actually compile once so golangci-lint's
-      # typecheck phase doesn't choke on unresolved imports. The default
-      # binary install of golangci-lint-action doesn't run any Go commands
-      # before lint, and our project apparently has a shape where the lint
-      # binary's own resolver alone can't find third-party packages —
-      # `go build` triggers normal toolchain resolution and primes the
-      # caches that lint then reuses.
-      - run: go mod download
-      - run: go build ./...
-      - uses: golangci/golangci-lint-action@v6
-        with:
-          version: v1.61.0
-          args: --timeout=5m
-          skip-cache: true
+      # Bypass the action wrapper and call golangci-lint directly so the
+      # Go toolchain it inherits is the same one our build steps just
+      # populated. v1.61.0's typecheck phase otherwise couldn't resolve
+      # third-party imports in this project's setup.
+      - run: |
+          go mod download
+          go build ./...
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh \
+            | sh -s -- -b "$(go env GOPATH)/bin" v1.61.0
+          "$(go env GOPATH)/bin/golangci-lint" run --timeout=5m ./...
 
   mcp-bridge:
     name: mcp-bridge (node ${{ matrix.node }})
