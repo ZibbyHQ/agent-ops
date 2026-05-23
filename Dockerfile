@@ -42,6 +42,12 @@ COPY --from=build /out/agent-opsd /usr/local/bin/agent-opsd
 # Mount your own /etc/agent-ops/config.yaml at runtime to fully override.
 COPY config.example.yaml /etc/agent-ops/config.yaml
 
+# Set SHELL so the Claude Code CLI's Bash tool finds a valid POSIX shell.
+# Alpine ships /bin/sh (busybox), which works for everything an ops agent
+# needs (apk add, npm, curl, etc.). Without this, the CLI refuses to
+# spawn Bash with "No suitable shell found" even though /bin/sh exists.
+ENV SHELL=/bin/sh
+
 USER agentops
 WORKDIR /home/agentops
 
