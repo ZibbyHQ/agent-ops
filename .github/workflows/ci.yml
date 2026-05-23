@@ -40,19 +40,19 @@ jobs:
         with:
           go-version: "1.24"
           cache: true
-      # Download deps explicitly so golangci-lint's typecheck phase can
-      # actually resolve imports. golangci-lint-action@v6 installs only
-      # the lint binary; it doesn't hydrate the module cache, and the
-      # test/docker jobs would normally do it via `go build` first.
+      # Hydrate the module cache + actually compile once so golangci-lint's
+      # typecheck phase doesn't choke on unresolved imports. The default
+      # binary install of golangci-lint-action doesn't run any Go commands
+      # before lint, and our project apparently has a shape where the lint
+      # binary's own resolver alone can't find third-party packages —
+      # `go build` triggers normal toolchain resolution and primes the
+      # caches that lint then reuses.
       - run: go mod download
+      - run: go build ./...
       - uses: golangci/golangci-lint-action@v6
         with:
           version: v1.61.0
           args: --timeout=5m
-          # The action's cache is keyed by Go-file hashes only — it does
-          # NOT invalidate when .golangci.yml changes, which means a prior
-          # failing run can keep returning the cached "failed" verdict
-          # even after the config that caused the failure is fixed.
           skip-cache: true
 
   mcp-bridge:
