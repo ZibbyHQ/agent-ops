@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"strings"
 
@@ -94,10 +95,21 @@ func (d *Driver) Run(ctx context.Context, req driver.Request) (driver.Result, er
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
+	slog.Info("claudecli: spawning subprocess",
+		"bin", bin, "model", d.Model, "permission_mode", permMode,
+		"allowed_tools", allowedTools, "max_turns", req.MaxToolCalls,
+	)
 	if err := cmd.Run(); err != nil {
-		// Non-zero exit. Surface stderr in the Result so the user sees the
-		// reason without having to dig through container logs.
-		msg := fmt.Sprintf("claude CLI failed: %v: %s", err, strings.TrimSpace(stderr.String()))
+		// Non-zero exit. Surface stderr (truncated) on the Result and the
+		// daemon's structured log so the operator can see what went wrong
+		// without exec'ing into the container.
+		stderrStr := strings.TrimSpace(stderr.String())
+		slog.Error("claudecli: subprocess failed",
+			"err", err.Error(),
+			"stderr", truncate(stderrStr, 800),
+			"stdout_size", stdout.Len(),
+		)
+		msg := fmt.Sprintf("claude CLI failed: %v: %s", err, stderrStr)
 		return driver.Result{Error: msg}, nil
 	}
 
@@ -132,6 +144,13 @@ func (d *Driver) Run(ctx context.Context, req driver.Request) (driver.Result, er
 		ToolCalls:    resp.NumTurns,
 		CostUSDMicro: int64(resp.TotalCostUSD * 1_000_000),
 	}, nil
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 // ensureBinaryAvailable is a friendly preflight: returns an error if the

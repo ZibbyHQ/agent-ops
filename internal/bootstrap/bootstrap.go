@@ -15,6 +15,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -98,6 +99,7 @@ func MaybeRunFirstRun(
 
 	// Trigger one synchronous run. Pass through the scheduler so the same
 	// path is used as RunNow + tests.
+	slog.Info("bootstrap: invoking first-run task", "name", t.Name)
 	run, err := sched.RunNow(ctx, t.Name, t.Prompt)
 	if err != nil {
 		// Don't write the marker on failure — operator may want to retry
@@ -105,15 +107,25 @@ func MaybeRunFirstRun(
 		return fmt.Errorf("bootstrap: first-run task failed: %w", err)
 	}
 
-	// Auto-write the agent's first long-term fact: bootstrap completed +
-	// a digest of what the agent itself reported doing. This is what gives
-	// the daemon any clue at all about itself on subsequent restarts; the
-	// alternative is the agent re-discovering its own environment every
-	// boot via shell probes.
+	// Surface what the agent actually did. Without this the daemon goes
+	// silent between "mcp token ready" and "mcp server listening" while
+	// the LLM works, and the operator sees nothing in CloudWatch even
+	// after the run completes — the result lives only in SQLite. Logging
+	// the post-run summary is the cheapest way to make container logs
+	// useful for inspecting bootstrap outcomes.
 	summary := strings.TrimSpace(run.Summary)
 	if summary == "" {
 		summary = "(no summary returned by bootstrap agent)"
 	}
+	slog.Info("bootstrap: first-run task complete",
+		"run_id", run.ID,
+		"status", run.Status,
+		"tool_calls", run.ToolCalls,
+		"cost_usd_micro", run.CostUSDMicro,
+		"summary", truncate(summary, 1200),
+		"error", run.Error,
+	)
+
 	if _, addErr := store.AddFact(ctx, "bootstrap",
 		"Initial setup completed at "+time.Now().UTC().Format(time.RFC3339)+
 			": "+truncate(summary, 600)); addErr != nil {
