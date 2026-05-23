@@ -28,7 +28,7 @@ RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
 # on it. Static binary + tiny base = ~12MB image.
 FROM alpine:3.20
 
-RUN apk add --no-cache ca-certificates tzdata busybox-extras curl nodejs npm \
+RUN apk add --no-cache ca-certificates tzdata busybox-extras curl bash nodejs npm \
     && npm install -g --no-audit --no-fund @anthropic-ai/claude-code \
     && adduser -D -u 10000 agentops \
     && mkdir -p /var/lib/agent-ops /etc/agent-ops \
@@ -42,11 +42,11 @@ COPY --from=build /out/agent-opsd /usr/local/bin/agent-opsd
 # Mount your own /etc/agent-ops/config.yaml at runtime to fully override.
 COPY config.example.yaml /etc/agent-ops/config.yaml
 
-# Set SHELL so the Claude Code CLI's Bash tool finds a valid POSIX shell.
-# Alpine ships /bin/sh (busybox), which works for everything an ops agent
-# needs (apk add, npm, curl, etc.). Without this, the CLI refuses to
-# spawn Bash with "No suitable shell found" even though /bin/sh exists.
-ENV SHELL=/bin/sh
+# Set SHELL so the Claude Code CLI's Bash tool finds a real bash. The
+# CLI's Bash tool specifically requires /bin/bash, not just any POSIX
+# shell, so we apt the GNU bash package above and set SHELL here. Without
+# this the CLI refuses to spawn Bash with "No suitable shell found".
+ENV SHELL=/bin/bash
 
 USER agentops
 WORKDIR /home/agentops
