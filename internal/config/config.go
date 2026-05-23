@@ -137,6 +137,15 @@ func (c *Config) applyDefaults() {
 		c.MCP.TokenEnv = "AGENT_OPS_TOKEN"
 	}
 
+	// AGENT_OPS_PROVIDER env override. Per-instance billing axis: an
+	// operator running a tenant container can pick "claude-cli" (OAuth /
+	// subscription billing) without re-baking the image. Mirrors the same
+	// pattern as AGENT_OPS_BOOTSTRAP_PROMPT below — env wins over baked
+	// config so per-tenant config.yaml mounts aren't required.
+	if p := strings.TrimSpace(os.Getenv("AGENT_OPS_PROVIDER")); p != "" {
+		c.Agent.Provider = p
+	}
+
 	// AGENT_OPS_BOOTSTRAP_PROMPT env override. The Zibby control plane sets
 	// this on the Fargate task at RunTask time so the per-instance goal
 	// ("install n8n on port 5678") ships as an env var instead of needing a
