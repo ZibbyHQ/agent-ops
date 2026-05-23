@@ -47,8 +47,11 @@ jobs:
       - run: |
           go mod download
           go build ./...
+          # v1.64.5 — newest v1 line. v1.61.0 had a known typecheck bug
+          # where lint's internal go/types couldn't resolve modules even
+          # when `go build` succeeded.
           curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh \
-            | sh -s -- -b "$(go env GOPATH)/bin" v1.61.0
+            | sh -s -- -b "$(go env GOPATH)/bin" v1.64.5
           "$(go env GOPATH)/bin/golangci-lint" run --timeout=5m ./...
 
   mcp-bridge:
