@@ -11,10 +11,11 @@ linters:
 
 # `defer x.Close()` / `defer tx.Rollback()` are universally treated as
 # cleanup noise — Close/Rollback returning an error after the work is
-# already done is not actionable. Excluding them via the issues.exclude
-# regex (matches the linter's formatted message text) is the simplest
-# project-wide fix.
+# already done isn't actionable. Match by linter + message text so the
+# filter is unambiguously scoped to errcheck output.
 issues:
-  exclude:
-    - 'Error return value of `[^`]+\.Close` is not checked'
-    - 'Error return value of `[^`]+\.Rollback` is not checked'
+  exclude-rules:
+    - linters: [errcheck]
+      text: 'Error return value of `[^`.]+\.Close` is not checked'
+    - linters: [errcheck]
+      text: 'Error return value of `[^`.]+\.Rollback` is not checked'
