@@ -44,7 +44,10 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          # amd64 only — Fargate prod uses amd64; arm64 multi-arch QEMU
+          # build adds ~5min and was flaking under @anthropic-ai/claude-code
+          # npm install on the arm64 leg. Add arm64 back once we need it.
+          platforms: linux/amd64
           push: true
           tags: |
             ghcr.io/zibbyhq/agent-ops:${{ steps.ver.outputs.version }}
