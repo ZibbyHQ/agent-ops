@@ -44,6 +44,11 @@ jobs:
         with:
           version: v1.61.0
           args: --timeout=5m
+          # The action's cache is keyed by Go-file hashes only — it does
+          # NOT invalidate when .golangci.yml changes, which means a prior
+          # failing run can keep returning the cached "failed" verdict
+          # even after the config that caused the failure is fixed.
+          skip-cache: true
 
   mcp-bridge:
     name: mcp-bridge (node ${{ matrix.node }})
