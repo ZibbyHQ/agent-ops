@@ -95,7 +95,7 @@ Remote agents (Claude Code etc.) see all of these. The internal Claude driver se
 ## Architecture
 
 ```
-┌── compute host (Fargate / EC2 / k8s pod / Pi) ──────────┐
+┌── compute host (any Linux box — VPS, EC2, container, Pi)┐
 │  ┌── agent-ops daemon (Go, ~12MB) ──────────────┐       │
 │  │ Scheduler ─► Task Runner ─► Driver (Claude) │       │
 │  │                            │                 │       │
