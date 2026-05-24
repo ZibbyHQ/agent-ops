@@ -43,6 +43,12 @@ type Request struct {
 	// MaxToolCalls bounds the iteration loop.
 	MaxToolCalls int
 
+	// Model overrides the driver's default model for this single request.
+	// Empty → driver's configured default applies. Used to route routine
+	// cron tasks (Haiku) and install/upgrade tasks (Sonnet) through one
+	// driver instance without rebuilding it per call.
+	Model string
+
 	// LogSink receives narration of the run (one line per tool call etc.)
 	// for persistence into task_run_logs. Nil disables.
 	LogSink LogSink

@@ -147,6 +147,64 @@ bootstrap:
 	})
 }
 
+func TestParse_BootstrapModelOverrideParses(t *testing.T) {
+	// Per-task `model:` overrides agent.model so the operator can route
+	// install/upgrade tasks (which need reasoning) to Sonnet while leaving
+	// routine cron on a cheaper default. This test pins the YAML-tag wiring
+	// so a refactor of the Schedule struct can't silently drop the field.
+	yaml := validYAML + `
+bootstrap:
+  name: initial_setup
+  prompt: "install the thing"
+  model: claude-sonnet-4-6
+  tools: [shell]
+`
+	c, err := Parse(strings.NewReader(yaml))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if c.Bootstrap == nil {
+		t.Fatal("Bootstrap missing")
+	}
+	if c.Bootstrap.Model != "claude-sonnet-4-6" {
+		t.Errorf("Bootstrap.Model = %q, want claude-sonnet-4-6", c.Bootstrap.Model)
+	}
+}
+
+func TestParse_ScheduleModelOverrideParses(t *testing.T) {
+	// Same wiring check for the recurring-schedule path: per-schedule model
+	// overrides the daemon-wide agent.model default.
+	yaml := `
+agent:
+  provider: claude
+  model: claude-haiku-4-5-20251001
+  api_key_env: K
+schedules:
+  - name: weekly_upgrade
+    cron: "0 9 * * 1"
+    prompt: "upgrade"
+    model: claude-sonnet-4-6
+    tools: [shell]
+  - name: hourly_health
+    cron: "@hourly"
+    prompt: "check"
+    tools: [shell]
+`
+	c, err := Parse(strings.NewReader(yaml))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(c.Schedules) != 2 {
+		t.Fatalf("want 2 schedules, got %d", len(c.Schedules))
+	}
+	if c.Schedules[0].Model != "claude-sonnet-4-6" {
+		t.Errorf("weekly_upgrade.Model = %q", c.Schedules[0].Model)
+	}
+	if c.Schedules[1].Model != "" {
+		t.Errorf("hourly_health.Model should be empty (inherits agent.model), got %q", c.Schedules[1].Model)
+	}
+}
+
 func TestParse_AllowsReservedTopLevelKeys(t *testing.T) {
 	// Future v0.x features should not break v0.1 config files.
 	yaml := validYAML + `

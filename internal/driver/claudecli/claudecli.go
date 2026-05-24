@@ -77,14 +77,21 @@ func (d *Driver) Run(ctx context.Context, req driver.Request) (driver.Result, er
 		combined = req.SystemPrompt + "\n\n" + req.UserPrompt
 	}
 
+	// Per-request override beats driver default. Lets one driver instance
+	// route Haiku for cron checks + Sonnet for installs without rebuilding.
+	model := d.Model
+	if req.Model != "" {
+		model = req.Model
+	}
+
 	args := []string{
 		"--print", combined,
 		"--output-format", "json",
 		"--permission-mode", permMode,
 		"--allowedTools", allowedTools,
 	}
-	if d.Model != "" {
-		args = append(args, "--model", d.Model)
+	if model != "" {
+		args = append(args, "--model", model)
 	}
 	if req.MaxToolCalls > 0 {
 		args = append(args, "--max-turns", fmt.Sprintf("%d", req.MaxToolCalls))
@@ -96,7 +103,7 @@ func (d *Driver) Run(ctx context.Context, req driver.Request) (driver.Result, er
 	cmd.Stderr = &stderr
 
 	slog.Info("claudecli: spawning subprocess",
-		"bin", bin, "model", d.Model, "permission_mode", permMode,
+		"bin", bin, "model", model, "permission_mode", permMode,
 		"allowed_tools", allowedTools, "max_turns", req.MaxToolCalls,
 	)
 	if err := cmd.Run(); err != nil {

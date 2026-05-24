@@ -33,8 +33,15 @@ type Scheduler struct {
 	store  *state.Store
 	log    *slog.Logger
 
-	mu       sync.Mutex
-	entries  map[string]cron.EntryID // task name → entry id
+	mu      sync.Mutex
+	entries map[string]cron.EntryID // task name → entry id
+
+	// modelOverrides maps taskName → model id from cfg.Schedules / cfg.Bootstrap.
+	// We don't persist Model in SQLite because the YAML config is authoritative;
+	// holding the per-task override in memory avoids a schema migration and
+	// keeps MCP-side task edits (which set cron / prompt / tools, not model)
+	// from accidentally clobbering the model choice.
+	modelOverrides map[string]string
 }
 
 // New returns a Scheduler. The caller must call Start before Add* takes effect.
@@ -46,10 +53,11 @@ func New(runner *task.Runner, store *state.Store, logger *slog.Logger) *Schedule
 		cron: cron.New(cron.WithParser(cron.NewParser(
 			cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor,
 		))),
-		runner:  runner,
-		store:   store,
-		log:     logger,
-		entries: map[string]cron.EntryID{},
+		runner:         runner,
+		store:          store,
+		log:            logger,
+		entries:        map[string]cron.EntryID{},
+		modelOverrides: map[string]string{},
 	}
 }
 
@@ -81,6 +89,19 @@ func (s *Scheduler) Hydrate(ctx context.Context, cfg *config.Config) error {
 		byName[t.Name] = t
 	}
 	// Config-defined tasks overwrite any prior persisted version.
+	s.mu.Lock()
+	for _, sched := range cfg.Schedules {
+		if sched.Model != "" {
+			s.modelOverrides[sched.Name] = sched.Model
+		}
+	}
+	// Bootstrap's model override flows in via the same map so RunNow picks
+	// it up when bootstrap.MaybeRunFirstRun invokes the task by name.
+	if cfg.Bootstrap != nil && cfg.Bootstrap.Model != "" {
+		s.modelOverrides[cfg.Bootstrap.Name] = cfg.Bootstrap.Model
+	}
+	s.mu.Unlock()
+
 	for _, sched := range cfg.Schedules {
 		enabled := sched.Enabled == nil || *sched.Enabled
 		t := state.Task{
@@ -148,6 +169,7 @@ func (s *Scheduler) makeJob(t state.Task) func() {
 			Trigger: task.TriggerSchedule,
 			Prompt:  cur.Prompt,
 			Tools:   cur.Tools,
+			Model:   s.modelFor(cur.Name),
 		})
 		if runErr != nil {
 			s.log.Error("scheduler: run failed", "name", cur.Name, "error", runErr)
@@ -195,8 +217,33 @@ func (s *Scheduler) RunNow(ctx context.Context, taskName, overridePrompt string)
 		Trigger: task.TriggerManual,
 		Prompt:  prompt,
 		Tools:   t.Tools,
+		Model:   s.modelFor(t.Name),
 	})
 	return run, err
+}
+
+// SetModelOverride lets callers (e.g. bootstrap.MaybeRunFirstRun's verifier
+// pass, or future MCP tools) wire a per-task model that wasn't loaded from
+// cfg at Hydrate time. Empty model clears the override.
+func (s *Scheduler) SetModelOverride(taskName, model string) {
+	if taskName == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if model == "" {
+		delete(s.modelOverrides, taskName)
+		return
+	}
+	s.modelOverrides[taskName] = model
+}
+
+// modelFor returns the cached per-task model override (empty string falls
+// back to the driver's configured default in Driver.Run).
+func (s *Scheduler) modelFor(taskName string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.modelOverrides[taskName]
 }
 
 // Entries returns the currently-registered task names (for debugging / MCP).

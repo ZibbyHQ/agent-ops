@@ -17,7 +17,12 @@ agent:
   # Pick "claude-cli" when wrapping the daemon inside a tenant container
   # whose owner already pays for Claude — no separate API billing needed.
   provider: claude
-  model: claude-sonnet-4-6
+  # `agent.model` is the daemon-wide default. Each schedule (and `bootstrap`)
+  # may override with its own `model:` value — cheap routine cron checks
+  # stay on Haiku, install/upgrade/incident-response tasks that need real
+  # reasoning bump up to Sonnet. The override order is:
+  #   per-task `model:` (schedule or bootstrap) → agent.model (this line).
+  model: claude-haiku-4-5-20251001
   api_key_env: ANTHROPIC_API_KEY    # ignored when provider=claude-cli
   max_tool_calls_per_task: 25
   # Bumped from 10m to 20m: bootstrap tasks like "install n8n" can hit
@@ -43,6 +48,9 @@ bootstrap:
     2. Install + configure the target application per its README.
     3. Verify the app is reachable on its expected port.
     4. Report a one-paragraph summary of what you did.
+  # Bootstrap genuinely needs to reason about install errors, package
+  # mismatches, port conflicts — bump to Sonnet over the Haiku default.
+  model: claude-sonnet-4-6
   tools: [shell]
 
 # Recurring tasks. Each one fires on its cron expression. Edit names + prompts
@@ -50,6 +58,8 @@ bootstrap:
 schedules:
   - name: hourly_health_check
     cron: "0 * * * *"
+    # No `model:` → inherits the agent.model default (Haiku). "Is the app
+    # still alive?" is a cheap binary check that doesn't need Sonnet.
     prompt: |
       Verify the application is responding on its expected port.
       If not, restart the process and re-verify. Report status.
@@ -57,6 +67,9 @@ schedules:
 
   - name: weekly_upgrade
     cron: "0 9 * * 1"        # Mondays 09:00 UTC
+    # Upgrades involve rollback decisions, smoke-test interpretation, and
+    # release-note reading — escalate to Sonnet over the Haiku default.
+    model: claude-sonnet-4-6
     prompt: |
       Check upstream for a new release of the host application.
       If one exists:

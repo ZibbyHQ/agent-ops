@@ -55,8 +55,15 @@ func (d *Driver) Run(ctx context.Context, req driver.Request) (driver.Result, er
 	if d.APIKey == "" {
 		return driver.Result{}, errors.New("claude: APIKey is empty")
 	}
-	if d.Model == "" {
-		return driver.Result{}, errors.New("claude: Model is empty")
+	// Per-request override beats driver default. Lets one driver instance
+	// route mixed-model traffic (Haiku for cron checks, Sonnet for installs)
+	// without rebuilding.
+	model := d.Model
+	if req.Model != "" {
+		model = req.Model
+	}
+	if model == "" {
+		return driver.Result{}, errors.New("claude: Model is empty (set agent.model or per-task model)")
 	}
 	base := d.BaseURL
 	if base == "" {
@@ -87,7 +94,7 @@ func (d *Driver) Run(ctx context.Context, req driver.Request) (driver.Result, er
 
 	for iter := 0; iter < maxIter; iter++ {
 		body := claudeRequest{
-			Model:     d.Model,
+			Model:     model,
 			MaxTokens: maxOut,
 			System:    req.SystemPrompt,
 			Messages:  messages,

@@ -121,6 +121,10 @@ type Spec struct {
 	Trigger Trigger  // why we're running
 	Prompt  string   // user prompt
 	Tools   []string // tool allowlist; nil/empty → all
+	// Model overrides the driver's default model for THIS task (cost
+	// lever — Haiku for routine cron, Sonnet for install/upgrade/
+	// incident-response). Empty → driver default applies.
+	Model string
 }
 
 // Run executes one task. Returns the persisted TaskRun (terminal state) and
@@ -173,6 +177,7 @@ func (r *Runner) Run(ctx context.Context, spec Spec) (state.TaskRun, driver.Resu
 		UserPrompt:   spec.Prompt,
 		Tools:        r.Tools.Subset(spec.Tools),
 		MaxToolCalls: r.MaxToolCalls,
+		Model:        spec.Model,
 		LogSink:      sink,
 	}
 

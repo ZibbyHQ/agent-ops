@@ -75,8 +75,13 @@ type Schedule struct {
 	Name   string   `yaml:"name"`
 	Cron   string   `yaml:"cron"` // standard 5-field; "@hourly", "@daily" etc. accepted
 	Prompt string   `yaml:"prompt"`
-	Tools  []string `yaml:"tools"`  // allowlist; empty = all registered tools
-	Enabled *bool   `yaml:"enabled,omitempty"`
+	Tools  []string `yaml:"tools"` // allowlist; empty = all registered tools
+	// Model lets a single schedule (or bootstrap) pin a cheaper or beefier
+	// model than the daemon-wide default. Empty → use agent.model. Cost
+	// lever: route routine checks to Haiku, reserve Sonnet/Opus for
+	// install / upgrade / incident-response prompts that need reasoning.
+	Model   string `yaml:"model,omitempty"`
+	Enabled *bool  `yaml:"enabled,omitempty"`
 }
 
 // MCPConfig drives the agent-ops MCP server.
