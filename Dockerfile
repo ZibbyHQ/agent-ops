@@ -30,9 +30,7 @@ FROM alpine:3.20
 
 RUN apk add --no-cache ca-certificates tzdata busybox-extras curl bash nodejs npm \
     && npm install -g --no-audit --no-fund @anthropic-ai/claude-code \
-    && adduser -D -u 10000 agentops \
-    && mkdir -p /var/lib/agent-ops /etc/agent-ops \
-    && chown -R agentops:agentops /var/lib/agent-ops /etc/agent-ops
+    && mkdir -p /var/lib/agent-ops /etc/agent-ops
 
 COPY --from=build /out/agent-opsd /usr/local/bin/agent-opsd
 
@@ -48,8 +46,13 @@ COPY config.example.yaml /etc/agent-ops/config.yaml
 # this the CLI refuses to spawn Bash with "No suitable shell found".
 ENV SHELL=/bin/bash
 
-USER agentops
-WORKDIR /home/agentops
+# Runs as root by design. The daemon's job is to install + manage arbitrary
+# apps via shell — most catalog scripts (`apk add ...`, `mount`, etc.)
+# need root. The container is single-tenant (one ECS Fargate task per
+# managed-app instance, no other workload sharing the kernel), so the
+# isolation boundary is the container, not the in-container UID.
+USER root
+WORKDIR /root
 
 EXPOSE 7842
 
