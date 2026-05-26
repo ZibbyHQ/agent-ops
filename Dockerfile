@@ -1,55 +1,59 @@
 # syntax=docker/dockerfile:1.7
 
 # ─── build stage ───────────────────────────────────────────────────────────
+# Build still happens on Alpine because the daemon binary is CGO-disabled
+# pure Go — libc doesn't matter here. Smaller cache layer, faster CI.
 FROM golang:1.23-alpine AS build
 
-# Build args wired by GoReleaser / CI for embedding version in the binary.
 ARG VERSION=dev
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 
 WORKDIR /src
 
-# Dependency layer — caches as long as go.{mod,sum} don't change.
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Source layer.
 COPY . .
 
-# Static binary (modernc.org/sqlite is pure-Go so CGO can stay off).
 ENV CGO_ENABLED=0
 RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" \
     -o /out/agent-opsd ./cmd/agent-opsd
 
 # ─── runtime stage ─────────────────────────────────────────────────────────
-# alpine, not scratch — we want a real /bin/sh because the shell tool relies
-# on it. Static binary + tiny base = ~12MB image.
-FROM alpine:3.20
+# Switched off Alpine (musl) to Debian (glibc) so catalog scripts can install
+# the entire `manylinux` Python/Node ecosystem — PyTorch / playwright /
+# onnxruntime / sentence-transformers etc all ship glibc-only wheels with
+# no Alpine equivalent. node:20-bookworm-slim already ships Node 20 + npm
+# so we don't need a separate NodeSource setup step.
+FROM node:20-bookworm-slim
 
-RUN apk add --no-cache ca-certificates tzdata busybox-extras curl bash nodejs npm \
-    && npm install -g --no-audit --no-fund @anthropic-ai/claude-code \
-    && mkdir -p /var/lib/agent-ops /etc/agent-ops
+# `apt-get install` defaults to interactive prompts; non-interactive lets
+# `tzdata` and friends install silently.
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        tzdata \
+        curl \
+        bash \
+        procps \
+ && rm -rf /var/lib/apt/lists/* \
+ && npm install -g --no-audit --no-fund @anthropic-ai/claude-code \
+ && mkdir -p /var/lib/agent-ops /etc/agent-ops
 
 COPY --from=build /out/agent-opsd /usr/local/bin/agent-opsd
 
-# Bake the documented example config as the default so the image runs
-# without a mounted volume. Per-instance prompts come via the
-# AGENT_OPS_BOOTSTRAP_PROMPT env var (see internal/config/config.go).
-# Mount your own /etc/agent-ops/config.yaml at runtime to fully override.
 COPY config.example.yaml /etc/agent-ops/config.yaml
 
-# Set SHELL so the Claude Code CLI's Bash tool finds a real bash. The
-# CLI's Bash tool specifically requires /bin/bash, not just any POSIX
-# shell, so we apt the GNU bash package above and set SHELL here. Without
-# this the CLI refuses to spawn Bash with "No suitable shell found".
+# Claude Code CLI's Bash tool requires /bin/bash explicitly; SHELL=/bin/bash
+# is on Debian by default but we set it for parity with the old Alpine image.
 ENV SHELL=/bin/bash
 
-# Runs as root by design. The daemon's job is to install + manage arbitrary
-# apps via shell — most catalog scripts (`apk add ...`, `mount`, etc.)
-# need root. The container is single-tenant (one ECS Fargate task per
-# managed-app instance, no other workload sharing the kernel), so the
+# Catalog install scripts need root for apt-get / mount / etc. The container
+# is single-tenant (one Fargate task per managed-app instance) so the
 # isolation boundary is the container, not the in-container UID.
 USER root
 WORKDIR /root
