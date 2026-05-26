@@ -33,7 +33,15 @@ FROM node:20-bookworm-slim
 # `tzdata` and friends install silently.
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update \
+# Swap the apt sources from http:// to https:// BEFORE the first apt-get
+# run. The Managed Apps egress proxy is a CONNECT-only tunnel and rejects
+# plain-HTTP GETs with 405. Once apt uses https://, every apt request hits
+# the proxy as CONNECT deb.debian.org:443 → tunnel → no proxy involvement
+# in the actual fetch. This applies to every catalog script that calls
+# apt-get later too — they all inherit the HTTPS-only sources list.
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g; s|http://security.debian.org|https://security.debian.org|g' \
+        /etc/apt/sources.list.d/debian.sources \
+ && apt-get update \
  && apt-get install -y --no-install-recommends \
         ca-certificates \
         tzdata \
