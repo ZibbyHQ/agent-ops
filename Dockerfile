@@ -33,15 +33,19 @@ FROM node:20-bookworm-slim
 # `tzdata` and friends install silently.
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Swap the apt sources from http:// to https:// BEFORE the first apt-get
-# run. The Managed Apps egress proxy is a CONNECT-only tunnel and rejects
-# plain-HTTP GETs with 405. Once apt uses https://, every apt request hits
-# the proxy as CONNECT deb.debian.org:443 → tunnel → no proxy involvement
-# in the actual fetch. This applies to every catalog script that calls
-# apt-get later too — they all inherit the HTTPS-only sources list.
-RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g; s|http://security.debian.org|https://security.debian.org|g' \
-        /etc/apt/sources.list.d/debian.sources \
- && apt-get update \
+# Order matters here. ca-certificates is what makes HTTPS apt requests
+# possible — without it, the first HTTPS fetch dies with "certificate
+# verification failed." So we install ca-certificates using the default
+# (http://) sources first (GitHub Actions build runner has direct
+# internet, no proxy, so http works), THEN sed-rewrite the sources to
+# https:// so every runtime apt-get call by catalog scripts goes through
+# the Managed Apps egress proxy correctly.
+#
+# Why HTTPS at runtime: the egress proxy is a CONNECT-only tunnel; it
+# rejects plain-HTTP GETs with 405. Switching apt's sources to https://
+# makes apt do CONNECT deb.debian.org:443 first and tunnel the GET
+# inside, which the proxy forwards normally.
+RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         ca-certificates \
         tzdata \
@@ -49,6 +53,8 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g; s|http://security.
         bash \
         procps \
  && rm -rf /var/lib/apt/lists/* \
+ && sed -i 's|http://deb.debian.org|https://deb.debian.org|g; s|http://security.debian.org|https://security.debian.org|g' \
+        /etc/apt/sources.list.d/debian.sources \
  && npm install -g --no-audit --no-fund @anthropic-ai/claude-code \
  && mkdir -p /var/lib/agent-ops /etc/agent-ops
 
