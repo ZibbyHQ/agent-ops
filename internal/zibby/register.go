@@ -25,10 +25,18 @@ import (
 	"time"
 )
 
-// RegisterPortIfNeeded scans /proc/net/tcp for listening sockets, picks the
-// app's port (the first listener that isn't the agent-ops MCP itself), and
-// POSTs it to Zibby. No-op if any of ZIBBY_API_BASE_URL / INSTANCE_ID /
-// AGENT_OPS_TOKEN are unset — the daemon is then running standalone.
+// RegisterPortIfNeeded picks the app's port and POSTs it to Zibby. Priority:
+//  1. AGENT_OPS_APP_PORT env var (set by the Zibby catalog wiring when the
+//     deterministic install script declares a known port — e.g. n8n=5678,
+//     gastown=8080). Honored as-is, no scan. This is the only way to get
+//     the *right* port for apps that bind multiple listeners (e.g. node-red
+//     opens an admin socket on a random high port BEFORE the user-facing
+//     port comes up, and a /proc scan races and picks the wrong one).
+//  2. /proc/net/tcp{,6} scan — first LISTEN-state port that isn't the
+//     daemon's own MCP. Fallback for free-form (catalog-less) installs.
+//
+// No-op if ZIBBY_API_BASE_URL / INSTANCE_ID / AGENT_OPS_TOKEN are unset —
+// the daemon is then running standalone.
 //
 // mcpPort is the port the daemon's own MCP server listens on, excluded
 // from the scan so we don't accidentally hand it to ALB as the app port.
@@ -42,12 +50,12 @@ func RegisterPortIfNeeded(ctx context.Context, mcpPort int) {
 		return
 	}
 
-	port, err := detectAppPort(mcpPort)
+	port, source, err := resolveAppPort(mcpPort)
 	if err != nil {
-		slog.Warn("zibby: detectAppPort failed", "err", err.Error())
+		slog.Warn("zibby: resolveAppPort failed", "err", err.Error())
 		return
 	}
-	slog.Info("zibby: detected app listening port", "port", port)
+	slog.Info("zibby: resolved app listening port", "port", port, "source", source)
 
 	url := fmt.Sprintf("%s/apps/%s/register-port", apiBase, instanceID)
 	body, _ := json.Marshal(map[string]int{"port": port})
@@ -73,6 +81,28 @@ func RegisterPortIfNeeded(ctx context.Context, mcpPort int) {
 		return
 	}
 	slog.Info("zibby: register-port ok", "status", resp.StatusCode, "port", port)
+}
+
+// resolveAppPort returns the port to hand to Zibby. AGENT_OPS_APP_PORT wins
+// when present (deterministic catalog installs know the answer ahead of
+// time); otherwise we scan /proc. Second return value is "env" or "proc-scan"
+// for diagnostics so the operator can tell which path produced a wrong port.
+func resolveAppPort(mcpPort int) (int, string, error) {
+	if raw := strings.TrimSpace(os.Getenv("AGENT_OPS_APP_PORT")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil {
+			return 0, "", fmt.Errorf("AGENT_OPS_APP_PORT=%q is not an int: %w", raw, err)
+		}
+		if n <= 0 || n > 65535 {
+			return 0, "", fmt.Errorf("AGENT_OPS_APP_PORT=%d is out of range", n)
+		}
+		return n, "env", nil
+	}
+	p, err := detectAppPort(mcpPort)
+	if err != nil {
+		return 0, "", err
+	}
+	return p, "proc-scan", nil
 }
 
 // detectAppPort enumerates LISTEN-state TCP sockets from /proc/net/{tcp,tcp6}

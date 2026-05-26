@@ -1,10 +1,15 @@
 package bootstrap
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/ZibbyHQ/agent-ops/internal/config"
+	"github.com/ZibbyHQ/agent-ops/internal/state"
 )
 
 func TestExtractJSONObject(t *testing.T) {
@@ -152,5 +157,116 @@ func TestEnsureToken_ReadsPersistedFile(t *testing.T) {
 	}
 	if tok != prePersist {
 		t.Fatalf("expected pre-placed token, got %q", tok)
+	}
+}
+
+// TestRunScriptBootstrap_ExecutesAndStreams confirms the script-mode path
+// runs verbatim bash, captures the exit code, and writes a `script_ok` fact.
+// This is the core v0.1.12 change — the LLM-free install path.
+func TestRunScriptBootstrap_ExecutesAndStreams(t *testing.T) {
+	dir := t.TempDir()
+	store, err := state.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	// Use a marker file to confirm bash actually ran (vs `cmd.Start` lying
+	// about success); script also echoes so the stdout-streaming path is
+	// exercised. With a short timeout to keep CI fast.
+	marker := filepath.Join(dir, "script-ran")
+	t.Setenv("AGENT_OPS_BOOTSTRAP_SCRIPT",
+		"echo hello from script; touch "+marker+"; exit 0")
+	t.Setenv("AGENT_OPS_BOOTSTRAP_TIMEOUT", "5s")
+	cfg := &config.Config{StateDir: dir}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := runScriptBootstrap(ctx, cfg, store); err != nil {
+		t.Fatalf("runScriptBootstrap: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("marker file missing — script did not actually run: %v", err)
+	}
+	// Confirm a bootstrap fact was added (returned list comes from AddFact —
+	// we add one in the OK path).
+	got, _ := store.AddFact(ctx, "bootstrap", "test-probe")
+	var sawScriptOK bool
+	for _, f := range got {
+		if strings.Contains(f.Fact, "script_ok") {
+			sawScriptOK = true
+			break
+		}
+	}
+	if !sawScriptOK {
+		t.Fatalf("expected script_ok fact among %d facts", len(got))
+	}
+}
+
+func TestRunScriptBootstrap_NonZeroExitReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	store, err := state.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	t.Setenv("AGENT_OPS_BOOTSTRAP_SCRIPT", "echo about to fail; exit 42")
+	t.Setenv("AGENT_OPS_BOOTSTRAP_TIMEOUT", "5s")
+	cfg := &config.Config{StateDir: dir}
+
+	err = runScriptBootstrap(context.Background(), cfg, store)
+	if err == nil {
+		t.Fatal("expected error for exit 42")
+	}
+	if !strings.Contains(err.Error(), "42") {
+		t.Fatalf("error should mention exit code 42, got %q", err)
+	}
+}
+
+func TestRunScriptBootstrap_EmptyScriptIsError(t *testing.T) {
+	dir := t.TempDir()
+	store, err := state.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	t.Setenv("AGENT_OPS_BOOTSTRAP_SCRIPT", "")
+	cfg := &config.Config{StateDir: dir}
+
+	err = runScriptBootstrap(context.Background(), cfg, store)
+	if err == nil {
+		t.Fatal("expected error for empty script")
+	}
+	if !strings.Contains(err.Error(), "empty") {
+		t.Fatalf("error should mention empty, got %q", err)
+	}
+}
+
+func TestRunScriptBootstrap_TimeoutKills(t *testing.T) {
+	dir := t.TempDir()
+	store, err := state.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	// `sleep 60` with a 1s timeout — bash -c should be killed.
+	t.Setenv("AGENT_OPS_BOOTSTRAP_SCRIPT", "sleep 60")
+	t.Setenv("AGENT_OPS_BOOTSTRAP_TIMEOUT", "1s")
+	cfg := &config.Config{StateDir: dir}
+
+	start := time.Now()
+	err = runScriptBootstrap(context.Background(), cfg, store)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("error should mention timeout, got %q", err)
+	}
+	if elapsed > 15*time.Second {
+		t.Fatalf("kill took too long: %v", elapsed)
 	}
 }
