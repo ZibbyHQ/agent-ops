@@ -33,6 +33,7 @@ import (
 	"github.com/ZibbyHQ/agent-ops/internal/api/mcp"
 	"github.com/ZibbyHQ/agent-ops/internal/bootstrap"
 	"github.com/ZibbyHQ/agent-ops/internal/config"
+	"github.com/ZibbyHQ/agent-ops/internal/disku"
 	"github.com/ZibbyHQ/agent-ops/internal/driver"
 	"github.com/ZibbyHQ/agent-ops/internal/driver/claude"
 	"github.com/ZibbyHQ/agent-ops/internal/driver/claudecli"
@@ -44,7 +45,7 @@ import (
 )
 
 // version is set via -ldflags by the release pipeline.
-var version = "0.1.12"
+var version = "0.1.18"
 
 func main() {
 	// Subcommand routing: `agent-opsd version` short-circuits config load.
@@ -119,6 +120,15 @@ func run(cfgPath string, logger *slog.Logger) error {
 		return fmt.Errorf("scheduler.Hydrate: %w", err)
 	}
 	sched.Start()
+
+	// Per-instance EFS usage emitter. AWS does not expose StorageBytes
+	// per EFS access point — only per filesystem — so the only way to
+	// surface "MB used" in the per-instance UI is to measure from inside
+	// the container and log the number. The control plane reads these
+	// `msg=efs_usage` lines from CloudWatch to fill the Storage column.
+	// 60s cadence is cheap on the small (<10GB) EFS volumes managed apps
+	// use; bump if a workload turns out to make this expensive.
+	disku.Start(ctx, logger, cfg.StateDir, 60*time.Second)
 
 	// MCP server token
 	tok, err := bootstrap.EnsureToken(cfg.StateDir, cfg.MCP.TokenEnv)
