@@ -329,6 +329,134 @@ func TestToolsList_IncludesMissionTools(t *testing.T) {
 	}
 }
 
+// ─── fact_inspect ──────────────────────────────────────────────────────────
+
+func TestFactInspect_ReturnsUnfilteredFact(t *testing.T) {
+	srv, store, _ := setup(t)
+	ctx := context.Background()
+
+	// Add two facts; the second carries npm-warn noise that the prompt
+	// renderer would strip. fact_inspect must return the FULL text.
+	if _, err := store.AddFact(ctx, "auto", "first fact"); err != nil {
+		t.Fatal(err)
+	}
+	noisy := "bootstrap exited 7\nnpm warn deprecated foo@1.0.6: unsupported\nnpm warn deprecated bar@2.0.0: see migration"
+	if _, err := store.AddFact(ctx, "bootstrap", noisy); err != nil {
+		t.Fatal(err)
+	}
+
+	var res struct {
+		Content []struct{ Text string }
+		IsError bool
+	}
+	decodeResult(t, rpcCall(t, srv.URL, "tools/call", map[string]any{
+		"name":      "fact_inspect",
+		"arguments": map[string]any{"index": 0},
+	}), &res)
+	if res.IsError {
+		t.Fatalf("fact_inspect error: %s", res.Content[0].Text)
+	}
+	text := res.Content[0].Text
+	if !strings.Contains(text, "npm warn deprecated foo@1.0.6") {
+		t.Fatalf("unfiltered text missing the dropped lines: %s", text)
+	}
+	if !strings.Contains(text, "npm warn deprecated bar@2.0.0") {
+		t.Fatalf("unfiltered text missing the second dropped line: %s", text)
+	}
+	if !strings.Contains(text, "bootstrap exited 7") {
+		t.Fatalf("unfiltered text missing kept line: %s", text)
+	}
+	if !strings.Contains(text, `"source"`) || !strings.Contains(text, "bootstrap") {
+		t.Fatalf("response did not include source field: %s", text)
+	}
+
+	// index=1 should be the older "first fact".
+	decodeResult(t, rpcCall(t, srv.URL, "tools/call", map[string]any{
+		"name":      "fact_inspect",
+		"arguments": map[string]any{"index": 1},
+	}), &res)
+	if res.IsError {
+		t.Fatalf("fact_inspect index=1 error: %s", res.Content[0].Text)
+	}
+	if !strings.Contains(res.Content[0].Text, "first fact") {
+		t.Fatalf("index=1 should have returned the oldest fact, got: %s", res.Content[0].Text)
+	}
+}
+
+func TestFactInspect_NegativeIndex_ReturnsError(t *testing.T) {
+	srv, store, _ := setup(t)
+	if _, err := store.AddFact(context.Background(), "auto", "hi"); err != nil {
+		t.Fatal(err)
+	}
+	// Negative index must trigger a JSON-RPC error (code -32602), not a
+	// tool-result with isError=true. We need to see the .error envelope so
+	// peek at the raw response.
+	raw := rpcCall(t, srv.URL, "tools/call", map[string]any{
+		"name":      "fact_inspect",
+		"arguments": map[string]any{"index": -1},
+	})
+	var env struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("decode raw: %v; raw=%s", err, raw)
+	}
+	if env.Error == nil {
+		t.Fatalf("expected JSON-RPC error envelope, got: %s", raw)
+	}
+	if env.Error.Code != -32602 {
+		t.Fatalf("error code = %d, want -32602; raw=%s", env.Error.Code, raw)
+	}
+}
+
+func TestFactInspect_OutOfRange_ReturnsError(t *testing.T) {
+	srv, store, _ := setup(t)
+	if _, err := store.AddFact(context.Background(), "auto", "only fact"); err != nil {
+		t.Fatal(err)
+	}
+	raw := rpcCall(t, srv.URL, "tools/call", map[string]any{
+		"name":      "fact_inspect",
+		"arguments": map[string]any{"index": 5},
+	})
+	var env struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("decode raw: %v; raw=%s", err, raw)
+	}
+	if env.Error == nil {
+		t.Fatalf("expected JSON-RPC error envelope, got: %s", raw)
+	}
+	if env.Error.Code != -32602 {
+		t.Fatalf("error code = %d, want -32602; raw=%s", env.Error.Code, raw)
+	}
+	if !strings.Contains(env.Error.Message, "no fact at index 5") {
+		t.Fatalf("error message = %q, want 'no fact at index 5'", env.Error.Message)
+	}
+}
+
+func TestToolsList_IncludesFactInspect(t *testing.T) {
+	srv, _, _ := setup(t)
+	var got struct {
+		Tools []struct {
+			Name string `json:"name"`
+		} `json:"tools"`
+	}
+	decodeResult(t, rpcCall(t, srv.URL, "tools/list", map[string]any{}), &got)
+	for _, tt := range got.Tools {
+		if tt.Name == "fact_inspect" {
+			return
+		}
+	}
+	t.Fatalf("fact_inspect missing from tools/list (got %v)", got.Tools)
+}
+
 func TestHealthEndpoint(t *testing.T) {
 	srv, _, _ := setup(t)
 	resp, err := http.Get(srv.URL + "/healthz")

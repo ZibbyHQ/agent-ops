@@ -360,6 +360,8 @@ func (s *Server) handleToolsCall(w http.ResponseWriter, ctx context.Context, req
 		s.toolSetMission(w, ctx, req.ID, params.Arguments)
 	case "agent_remember_fact":
 		s.toolRememberFact(w, ctx, req.ID, params.Arguments)
+	case "fact_inspect":
+		s.toolFactInspect(w, ctx, req.ID, params.Arguments)
 	default:
 		writeJSONRPCError(w, req.ID, -32602, "no such tool: "+params.Name)
 	}
@@ -502,6 +504,56 @@ func (s *Server) toolSetMission(w http.ResponseWriter, ctx context.Context, id a
 		return
 	}
 	s.respond(w, id, toolTextResult("ok"))
+}
+
+// toolFactInspect returns the UNFILTERED text of one fact by recent-index
+// (0 == most recent, increasing backward). The system prompt strips
+// npm-warn-style noise from facts before rendering them; the agent calls
+// this tool when a filter hint flags something worth a closer look.
+//
+// The raw text is what the agent sees — we do NOT pass it through
+// filterFactForPrompt here. That's the whole point of the tool.
+func (s *Server) toolFactInspect(w http.ResponseWriter, ctx context.Context, id any, raw json.RawMessage) {
+	// We decode index manually because the test of "missing vs wrong type vs
+	// negative" matters for the spec'd error semantics: all three return
+	// -32602, but we want each branch to message clearly so the agent (which
+	// has to read the error) knows what to fix.
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		writeJSONRPCError(w, id, -32602, "bad args: "+err.Error())
+		return
+	}
+	idxRaw, ok := probe["index"]
+	if !ok {
+		writeJSONRPCError(w, id, -32602, "index is required")
+		return
+	}
+	var index int
+	if err := json.Unmarshal(idxRaw, &index); err != nil {
+		writeJSONRPCError(w, id, -32602, "index must be a non-negative integer")
+		return
+	}
+	if index < 0 {
+		writeJSONRPCError(w, id, -32602, "index must be a non-negative integer")
+		return
+	}
+	m, err := s.store.GetMission(ctx)
+	if err != nil {
+		s.respond(w, id, toolErrorResult(err.Error()))
+		return
+	}
+	// index 0 maps to the LAST element so it mirrors the prompt-render
+	// numbering (0 == most recent).
+	if index >= len(m.Facts) {
+		writeJSONRPCError(w, id, -32602, fmt.Sprintf("no fact at index %d", index))
+		return
+	}
+	f := m.Facts[len(m.Facts)-1-index]
+	s.respond(w, id, toolTextResult(mustEncodeJSON(map[string]any{
+		"source": f.Source,
+		"ts":     f.TS.Format("2006-01-02T15:04:05Z07:00"),
+		"fact":   f.Fact,
+	})))
 }
 
 func (s *Server) toolRememberFact(w http.ResponseWriter, ctx context.Context, id any, raw json.RawMessage) {
@@ -673,6 +725,11 @@ func builtinTools() []builtin {
 			name:        "agent_remember_fact",
 			description: "Append one fact to the mission journal. Use for important context the agent should carry across runs (versions installed, ports in use, decisions made). source defaults to 'user'.",
 			schema:      `{"type":"object","properties":{"fact":{"type":"string"},"source":{"type":"string"}},"required":["fact"]}`,
+		},
+		{
+			name:        "fact_inspect",
+			description: "Return the unfiltered text of a KNOWN FACT from the system prompt. The system prompt filters npm-warn noise from facts by default; if you need to see the dropped lines (e.g., to diagnose why a bootstrap exited 7 when the visible facts only show generic warns), call this with the fact's `<index>` from its rendered hint. Index 0 = most recent fact, increases backward.",
+			schema:      `{"type":"object","properties":{"index":{"type":"integer","minimum":0}},"required":["index"]}`,
 		},
 	}
 }

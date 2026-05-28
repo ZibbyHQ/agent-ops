@@ -61,7 +61,8 @@ host. You receive instructions and have a small set of tools (shell, etc.)
 to satisfy them. Be concise. Prefer read-only inspection before mutating.
 When a tool fails, recover or report — do not retry blindly. End the run
 when the user instruction is satisfied OR when you genuinely cannot make
-further progress; explain either outcome in plain English.`
+further progress; explain either outcome in plain English.
+If a KNOWN FACT shows "(N lines filtered as npm-warn noise — call fact_inspect(<index>) to see full)", call that tool only when a fact's exit code or error message warrants deeper inspection; routine npm-warn-only facts can be ignored.`
 
 // composeSystemPrompt prepends the instance Mission (charter + known facts)
 // to the runner's base system prompt. This is what gives the agent its
@@ -89,14 +90,21 @@ func composeSystemPrompt(base string, m state.Mission) string {
 		if len(facts) > 40 {
 			facts = facts[len(facts)-40:]
 		}
-		for _, f := range facts {
+		// `index` is the recent-facts index from the model's POV:
+		// 0 == most recent (== last element of `facts`). This matches the
+		// addressing scheme of the `fact_inspect` MCP tool, which subtracts
+		// from len(Facts)-1 so the model can call it with the hint's number.
+		for i, f := range facts {
+			index := len(facts) - 1 - i
+			filtered, hidden := filterFactForPrompt(f.Fact, index)
 			b.WriteString("- [")
 			b.WriteString(f.TS.Format("2006-01-02"))
 			b.WriteString("] (")
 			b.WriteString(f.Source)
 			b.WriteString(") ")
-			b.WriteString(f.Fact)
+			b.WriteString(filtered)
 			b.WriteString("\n")
+			_ = hidden // count surfaced inline by filterFactForPrompt's synthetic line
 		}
 		b.WriteString("\n")
 	}
@@ -263,4 +271,70 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// filterFactForPrompt strips routine npm-warn noise from a fact's text before
+// it lands in the system prompt. Lines matching the drop-list are removed
+// UNLESS they also match the keep-list (so `npm WARN ERESOLVE …` survives).
+//
+// `index` is the position of this fact in the recent-facts list as the model
+// sees it: 0 == most recent. It's surfaced in a synthetic trailing line so
+// the agent can call `fact_inspect(<index>)` to retrieve the unfiltered text
+// when something looks suspicious.
+//
+// On-disk facts are untouched — this is render-only.
+func filterFactForPrompt(s string, index int) (filtered string, hiddenLines int) {
+	// Keep-list wins. Real errors must survive even when wrapped in an
+	// npm-warn-ish line prefix.
+	keepNeedles := []string{
+		"error", "failed", "fatal", "eresolve", "enoent", "eaccess",
+		"etimedout", "exit code", "exit_code", "exit status",
+	}
+	// Drop-list: lines starting (after trimming leading whitespace) with
+	// these prefixes are noise. Case-insensitive.
+	dropPrefixes := []string{
+		"npm warn deprecated",
+		"npm warn ",
+		"npm WARN", // belt + suspenders for mixed-case logs; ToLower covers it
+	}
+
+	lines := strings.Split(s, "\n")
+	kept := make([]string, 0, len(lines))
+	hidden := 0
+	for _, ln := range lines {
+		lower := strings.ToLower(strings.TrimLeft(ln, " \t"))
+		isKeep := false
+		for _, k := range keepNeedles {
+			if strings.Contains(lower, k) {
+				isKeep = true
+				break
+			}
+		}
+		if isKeep {
+			kept = append(kept, ln)
+			continue
+		}
+		isDrop := false
+		for _, p := range dropPrefixes {
+			if strings.HasPrefix(lower, strings.ToLower(p)) {
+				isDrop = true
+				break
+			}
+		}
+		if isDrop {
+			hidden++
+			continue
+		}
+		kept = append(kept, ln)
+	}
+	out := strings.Join(kept, "\n")
+	if hidden > 0 {
+		hint := fmt.Sprintf("(%d lines filtered as npm-warn noise — call `fact_inspect(%d)` to see full)", hidden, index)
+		if out == "" {
+			out = hint
+		} else {
+			out = out + "\n" + hint
+		}
+	}
+	return out, hidden
 }

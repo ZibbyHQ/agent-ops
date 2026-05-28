@@ -242,6 +242,130 @@ func TestRunner_NoMission_UsesBaseSystemPromptOnly(t *testing.T) {
 	}
 }
 
+// ─── filterFactForPrompt ───────────────────────────────────────────────────
+
+func TestFilterFactForPrompt_DropsNpmWarnDeprecated(t *testing.T) {
+	in := strings.Join([]string{
+		"bootstrap failed",
+		"npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory",
+		"npm warn deprecated rimraf@2.7.1: Rimraf versions prior to v4 are no longer supported",
+		"installed 0 packages",
+	}, "\n")
+	out, hidden := filterFactForPrompt(in, 0)
+	if hidden != 2 {
+		t.Fatalf("hidden = %d, want 2", hidden)
+	}
+	if strings.Contains(out, "inflight") || strings.Contains(out, "rimraf") {
+		t.Fatalf("dropped lines leaked into output: %s", out)
+	}
+	if !strings.Contains(out, "bootstrap failed") {
+		t.Fatalf("non-noise line was dropped: %s", out)
+	}
+	if !strings.Contains(out, "installed 0 packages") {
+		t.Fatalf("benign line dropped: %s", out)
+	}
+}
+
+func TestFilterFactForPrompt_KeepsRealErrorsAmongWarns(t *testing.T) {
+	// ERESOLVE / ENOENT / "exit code" — these are signal, not noise. They
+	// often come prefixed with "npm WARN" so we MUST keep them even though
+	// the line looks like an npm warn at first glance.
+	in := strings.Join([]string{
+		"npm warn deprecated some-old-pkg",            // drop
+		"npm WARN ERESOLVE overriding peer dependency", // keep (eresolve)
+		"npm warn config production not recognized",   // drop (plain npm-warn noise)
+		"command failed: exit code 7",                  // keep (failed + exit code)
+		"ENOENT: no such file or directory",            // keep (enoent)
+	}, "\n")
+	out, hidden := filterFactForPrompt(in, 3)
+	if !strings.Contains(out, "ERESOLVE") {
+		t.Fatalf("ERESOLVE line was dropped — keep-list broken: %s", out)
+	}
+	if !strings.Contains(out, "exit code 7") {
+		t.Fatalf("exit-code line dropped: %s", out)
+	}
+	if !strings.Contains(out, "ENOENT") {
+		t.Fatalf("ENOENT dropped: %s", out)
+	}
+	if strings.Contains(out, "some-old-pkg") {
+		t.Fatalf("deprecated noise leaked: %s", out)
+	}
+	if strings.Contains(out, "config production") {
+		t.Fatalf("plain npm-warn noise leaked: %s", out)
+	}
+	if hidden != 2 {
+		t.Fatalf("hidden = %d, want 2", hidden)
+	}
+}
+
+func TestFilterFactForPrompt_AppendsHintOnFilter(t *testing.T) {
+	in := "ok line\nnpm warn deprecated foo@1.2.3: stop using this"
+	out, hidden := filterFactForPrompt(in, 7)
+	if hidden != 1 {
+		t.Fatalf("hidden = %d, want 1", hidden)
+	}
+	if !strings.Contains(out, "1 lines filtered as npm-warn noise") {
+		t.Fatalf("hint missing: %s", out)
+	}
+	if !strings.Contains(out, "fact_inspect(7)") {
+		t.Fatalf("hint did not carry the index: %s", out)
+	}
+}
+
+func TestFilterFactForPrompt_NoHintWhenNothingFiltered(t *testing.T) {
+	in := "all good\nnothing to filter here\nexit code 0"
+	out, hidden := filterFactForPrompt(in, 0)
+	if hidden != 0 {
+		t.Fatalf("hidden = %d, want 0", hidden)
+	}
+	if strings.Contains(out, "lines filtered") {
+		t.Fatalf("hint should not appear when nothing was filtered: %s", out)
+	}
+	if strings.Contains(out, "fact_inspect") {
+		t.Fatalf("fact_inspect hint should not appear: %s", out)
+	}
+}
+
+func TestComposeSystemPrompt_PassesIndexThroughCorrectly(t *testing.T) {
+	ctx := context.Background()
+	st := openState(t)
+
+	// Three facts: only the middle one carries npm-warn noise. After render,
+	// it should be index=1 (since 0 == newest == "fact-three").
+	if _, err := st.AddFact(ctx, "auto", "fact-one (oldest)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AddFact(ctx, "bootstrap",
+		"middle fact had a problem\nnpm warn deprecated foo@1.0.0: drop me",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AddFact(ctx, "auto", "fact-three (newest)"); err != nil {
+		t.Fatal(err)
+	}
+
+	m, err := st.GetMission(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := composeSystemPrompt(defaultSystemPrompt, m)
+
+	// Only the middle fact should have the hint.
+	if !strings.Contains(out, "fact_inspect(1)") {
+		t.Fatalf("expected fact_inspect(1) hint on middle fact, got:\n%s", out)
+	}
+	if strings.Contains(out, "fact_inspect(0)") {
+		t.Fatalf("newest fact should NOT have a hint: %s", out)
+	}
+	if strings.Contains(out, "fact_inspect(2)") {
+		t.Fatalf("oldest fact should NOT have a hint: %s", out)
+	}
+	// And the noise line itself must not appear in the rendered prompt.
+	if strings.Contains(out, "deprecated foo@1.0.0") {
+		t.Fatalf("noise line leaked into prompt: %s", out)
+	}
+}
+
 func TestRunner_RejectsEmptyName(t *testing.T) {
 	st := openState(t)
 	r := NewRunner(&fakeDriver{name: "fake", run: func(context.Context, driver.Request) (driver.Result, error) {
