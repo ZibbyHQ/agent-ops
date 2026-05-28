@@ -26,6 +26,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/ZibbyHQ/agent-ops/internal/scheduler"
@@ -33,13 +34,34 @@ import (
 	"github.com/ZibbyHQ/agent-ops/internal/tool"
 )
 
+// defaultAllowedOrigins is the baked-in CORS allowlist for browser callers.
+// Non-browser clients (curl, Go HTTP, the Zibby control plane Lambda) send
+// no Origin header at all and bypass this check entirely. Operators can
+// extend this list at runtime via AGENT_OPS_ALLOWED_ORIGINS (comma-sep).
+var defaultAllowedOrigins = []string{
+	"https://zibby.dev",
+	"https://zibby.app",
+	"https://www.zibby.dev",
+	"https://www.zibby.app",
+}
+
+// ErrEmptyToken is returned by New when the configured bearer token is
+// empty. The daemon must fail-closed: an unauthenticated MCP endpoint
+// exposes host_shell to anyone who can reach the port.
+var ErrEmptyToken = errors.New("mcp: bearer token is empty (refusing to start with auth disabled)")
+
 // Server is the MCP HTTP handler. Construct via New, mount on net/http.
 type Server struct {
 	scheduler *scheduler.Scheduler
 	store     *state.Store
 	tools     *tool.Registry
-	token     string // bearer; empty → auth disabled (NOT recommended)
+	token     string // bearer; New refuses to build a Server with an empty token
 	log       *slog.Logger
+
+	// allowedOrigins is the set of Origin header values acceptable on
+	// cross-origin browser requests. Requests with no Origin header are
+	// allowed through (non-browser clients). See validateOrigin.
+	allowedOrigins map[string]struct{}
 
 	serverName    string
 	serverVersion string
@@ -58,7 +80,15 @@ type Config struct {
 }
 
 // New builds an MCP Server.
-func New(c Config) *Server {
+//
+// Returns ErrEmptyToken if Config.Token is empty. agent-ops exposes
+// host_shell (arbitrary command execution in the container) over MCP —
+// running with auth disabled is never the right answer, so we fail
+// at startup rather than logging a warning that nobody will see.
+func New(c Config) (*Server, error) {
+	if c.Token == "" {
+		return nil, ErrEmptyToken
+	}
 	logger := c.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -72,14 +102,36 @@ func New(c Config) *Server {
 		ver = "0.1.0"
 	}
 	return &Server{
-		scheduler:     c.Scheduler,
-		store:         c.Store,
-		tools:         c.Tools,
-		token:         c.Token,
-		log:           logger,
-		serverName:    name,
-		serverVersion: ver,
+		scheduler:      c.Scheduler,
+		store:          c.Store,
+		tools:          c.Tools,
+		token:          c.Token,
+		log:            logger,
+		allowedOrigins: loadAllowedOrigins(),
+		serverName:     name,
+		serverVersion:  ver,
+	}, nil
+}
+
+// loadAllowedOrigins parses AGENT_OPS_ALLOWED_ORIGINS (comma-separated)
+// and falls back to defaultAllowedOrigins when unset/empty. Whitespace
+// around entries is trimmed; empty entries are dropped.
+func loadAllowedOrigins() map[string]struct{} {
+	out := map[string]struct{}{}
+	raw := os.Getenv("AGENT_OPS_ALLOWED_ORIGINS")
+	if strings.TrimSpace(raw) == "" {
+		for _, o := range defaultAllowedOrigins {
+			out[o] = struct{}{}
+		}
+		return out
 	}
+	for _, o := range strings.Split(raw, ",") {
+		o = strings.TrimSpace(o)
+		if o != "" {
+			out[o] = struct{}{}
+		}
+	}
+	return out
 }
 
 // Handler returns the http.Handler implementing the Streamable HTTP transport.
@@ -114,6 +166,10 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 // handleGET serves the SSE channel. v0.1 emits no server-initiated messages —
 // we open the stream and keep it alive so MCP clients that probe this work.
 func (s *Server) handleGET(w http.ResponseWriter, r *http.Request) {
+	if !s.originOK(r) {
+		http.Error(w, "forbidden: origin not allowed", http.StatusForbidden)
+		return
+	}
 	if !s.authOK(r) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -133,6 +189,14 @@ func (s *Server) handleGET(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePOST(w http.ResponseWriter, r *http.Request) {
+	if !s.originOK(r) {
+		// Defence-in-depth: a present-but-non-allowlisted Origin means a
+		// browser tab from somewhere unexpected. The bearer-token gate
+		// already blocks drive-bys (browsers can't read AGENT_OPS_TOKEN)
+		// but a future leak shouldn't be one hop away from host_shell.
+		http.Error(w, "forbidden: origin not allowed", http.StatusForbidden)
+		return
+	}
 	if !s.authOK(r) {
 		writeJSONRPCError(w, nil, -32001, "unauthorized")
 		return
@@ -172,16 +236,34 @@ func (s *Server) handlePOST(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) authOK(r *http.Request) bool {
+	// Belt-and-suspenders: New refuses to build a Server with an empty
+	// token, but if a future caller bypasses the constructor we still
+	// fail-closed rather than fail-open.
 	if s.token == "" {
-		// Disabled in dev — log loudly.
-		s.log.Warn("mcp: no token configured, accepting unauthenticated request")
-		return true
+		s.log.Error("mcp: refusing request — token unset (this should be unreachable)")
+		return false
 	}
 	h := r.Header.Get("Authorization")
 	if !strings.HasPrefix(h, "Bearer ") {
 		return false
 	}
 	return strings.TrimPrefix(h, "Bearer ") == s.token
+}
+
+// originOK enforces a CORS-style allowlist on requests that carry an
+// Origin header. Non-browser callers (curl, Go clients, the Zibby control
+// plane Lambda) don't set Origin and pass through. Browsers set it
+// automatically and we reject anything outside the allowlist.
+func (s *Server) originOK(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	if _, ok := s.allowedOrigins[origin]; ok {
+		return true
+	}
+	s.log.Warn("mcp: rejecting cross-origin request", "origin", origin)
+	return false
 }
 
 func (s *Server) initializeResult() map[string]any {
@@ -595,5 +677,3 @@ func builtinTools() []builtin {
 	}
 }
 
-// Token-acceptance helper so tests can override easily.
-var _ = errors.New

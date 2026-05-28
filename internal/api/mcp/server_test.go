@@ -42,12 +42,15 @@ func setup(t *testing.T) (*httptest.Server, *state.Store, *scheduler.Scheduler) 
 	sched.Start()
 	t.Cleanup(func() { _ = sched.Stop(context.Background()) })
 
-	srv := New(Config{
+	srv, err := New(Config{
 		Scheduler: sched,
 		Store:     st,
 		Tools:     tools,
 		Token:     "test-token",
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	httpSrv := httptest.NewServer(srv.Handler())
 	t.Cleanup(httpSrv.Close)
@@ -335,5 +338,110 @@ func TestHealthEndpoint(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("healthz status %d", resp.StatusCode)
+	}
+}
+
+// ─── H5: fail-closed on empty token ────────────────────────────────────────
+
+func TestNew_RejectsEmptyToken(t *testing.T) {
+	tools := tool.NewRegistry()
+	_, err := New(Config{
+		Tools: tools,
+		Token: "",
+	})
+	if err == nil {
+		t.Fatal("expected error from New with empty token, got nil")
+	}
+	if err != ErrEmptyToken {
+		t.Fatalf("expected ErrEmptyToken, got %v", err)
+	}
+}
+
+// ─── H4: Origin allowlist ──────────────────────────────────────────────────
+
+// originPost issues a POST /mcp with an optional Origin header and the
+// canonical test Bearer. Returns status + body so the caller can assert.
+func originPost(t *testing.T, base, origin string) (int, string) {
+	t.Helper()
+	req, _ := http.NewRequest("POST", base+"/mcp",
+		strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	if origin != "" {
+		req.Header.Set("Origin", origin)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(body)
+}
+
+func TestOrigin_AllowsAllowlisted(t *testing.T) {
+	srv, _, _ := setup(t)
+	status, body := originPost(t, srv.URL, "https://zibby.dev")
+	if status != http.StatusOK {
+		t.Fatalf("Origin=https://zibby.dev: status %d, body=%s", status, body)
+	}
+}
+
+func TestOrigin_AllowsMissing(t *testing.T) {
+	srv, _, _ := setup(t)
+	status, body := originPost(t, srv.URL, "")
+	if status != http.StatusOK {
+		t.Fatalf("missing Origin: status %d, body=%s", status, body)
+	}
+}
+
+func TestOrigin_RejectsForeign(t *testing.T) {
+	srv, _, _ := setup(t)
+	status, body := originPost(t, srv.URL, "https://evil.example.com")
+	if status != http.StatusForbidden {
+		t.Fatalf("Origin=https://evil.example.com: expected 403, got %d body=%s", status, body)
+	}
+	if !strings.Contains(body, "origin not allowed") {
+		t.Fatalf("expected origin error message, got %s", body)
+	}
+}
+
+func TestOrigin_EnvOverride(t *testing.T) {
+	// Setting AGENT_OPS_ALLOWED_ORIGINS replaces the defaults entirely —
+	// operators get an explicit list, not an additive one.
+	t.Setenv("AGENT_OPS_ALLOWED_ORIGINS", "https://ops.example.internal, https://other.example.internal")
+
+	st, err := state.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	tools := tool.NewRegistry()
+	_ = tools.Register(tool.NewShellTool())
+	runner := task.NewRunner(fakeDriver{}, tools, st)
+	sched := scheduler.New(runner, st, slog.Default())
+	sched.Start()
+	t.Cleanup(func() { _ = sched.Stop(context.Background()) })
+
+	mcpSrv, err := New(Config{
+		Scheduler: sched,
+		Store:     st,
+		Tools:     tools,
+		Token:     "test-token",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpSrv := httptest.NewServer(mcpSrv.Handler())
+	t.Cleanup(httpSrv.Close)
+
+	// Custom origin allowed
+	if status, body := originPost(t, httpSrv.URL, "https://ops.example.internal"); status != http.StatusOK {
+		t.Fatalf("custom origin should be allowed: status=%d body=%s", status, body)
+	}
+	// Default origin no longer allowed (env replaces defaults)
+	if status, _ := originPost(t, httpSrv.URL, "https://zibby.dev"); status != http.StatusForbidden {
+		t.Fatalf("default origin should be rejected when env override is set: status=%d", status)
 	}
 }
