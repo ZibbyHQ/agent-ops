@@ -132,11 +132,34 @@ func (d *Driver) Run(ctx context.Context, req driver.Request) (driver.Result, er
 	raw := stdout.Bytes()
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		// Fall back to raw output. Better than dropping the agent's work.
+		// Surface the unparseable stdout to the daemon log too — operator
+		// needs the actual bytes to debug a CLI output format change.
+		slog.Warn("claudecli: stdout parse failed",
+			"err", err.Error(),
+			"raw", truncate(string(raw), 4000),
+		)
 		return driver.Result{
 			FinalMessage: strings.TrimSpace(string(raw)),
 			Error:        fmt.Sprintf("claude CLI: parse JSON output: %v", err),
 		}, nil
 	}
+
+	// Emit the assistant's final message + cost stats + turn count to
+	// the daemon's structured log so the dashboard / operator can SEE
+	// what Claude actually said. Without this we only know that
+	// claudecli was *spawned* — not what it produced. Truncated at 4k
+	// to bound CloudWatch event size (events over 256KB get dropped).
+	stderrStr := strings.TrimSpace(stderr.String())
+	slog.Info("claudecli: conversation complete",
+		"system_prompt", truncate(req.SystemPrompt, 1500),
+		"user_prompt", truncate(req.UserPrompt, 2000),
+		"result", truncate(resp.Result, 4000),
+		"num_turns", resp.NumTurns,
+		"total_cost_usd", resp.TotalCostUSD,
+		"is_error", resp.IsError,
+		"stderr", truncate(stderrStr, 800),
+	)
+
 	if resp.IsError {
 		return driver.Result{
 			FinalMessage: resp.Result,
