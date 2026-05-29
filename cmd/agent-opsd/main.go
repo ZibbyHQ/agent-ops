@@ -3,19 +3,20 @@
 // agent-opsd is the agent-ops daemon binary.
 //
 // Usage:
-//   agent-opsd --config /etc/agent-ops/config.yaml
-//   agent-opsd version
+//
+//	agent-opsd --config /etc/agent-ops/config.yaml
+//	agent-opsd version
 //
 // Lifecycle:
-//   1. Load + validate config
-//   2. Ensure state directory + bearer token exist
-//   3. Open SQLite state
-//   4. Register host tools (shell)
-//   5. Construct Driver (claude in v0.1)
-//   6. Hydrate scheduler from State + Config
-//   7. Start MCP HTTP server + cron scheduler
-//   8. Run first-run bootstrap once (if configured)
-//   9. Block on signals; gracefully drain on SIGTERM / SIGINT
+//  1. Load + validate config
+//  2. Ensure state directory + bearer token exist
+//  3. Open SQLite state
+//  4. Register host tools (shell)
+//  5. Construct Driver (claude in v0.1)
+//  6. Hydrate scheduler from State + Config
+//  7. Start MCP HTTP server + cron scheduler
+//  8. Run first-run bootstrap once (if configured)
+//  9. Block on signals; gracefully drain on SIGTERM / SIGINT
 package main
 
 import (
@@ -38,6 +39,7 @@ import (
 	"github.com/ZibbyHQ/agent-ops/internal/driver/claude"
 	"github.com/ZibbyHQ/agent-ops/internal/driver/claudecli"
 	"github.com/ZibbyHQ/agent-ops/internal/node"
+	"github.com/ZibbyHQ/agent-ops/internal/runreport"
 	"github.com/ZibbyHQ/agent-ops/internal/scheduler"
 	"github.com/ZibbyHQ/agent-ops/internal/state"
 	"github.com/ZibbyHQ/agent-ops/internal/task"
@@ -45,7 +47,7 @@ import (
 )
 
 // version is set via -ldflags by the release pipeline.
-var version = "0.1.21"
+var version = "0.1.22"
 
 func main() {
 	// Subcommand routing: `agent-opsd version` short-circuits config load.
@@ -111,6 +113,11 @@ func run(cfgPath string, logger *slog.Logger) error {
 	if cfg.Agent.TaskTimeout > 0 {
 		runner.TaskTimeout = cfg.Agent.TaskTimeout
 	}
+	// Push each finished run to the control plane so the "Agent activity" UI
+	// renders from a durable table instead of grepping CloudWatch. The
+	// reporter is a no-op unless ZIBBY_API_BASE_URL / INSTANCE_ID /
+	// AGENT_OPS_TOKEN are all set, so non-Zibby deployments report nothing.
+	runner.Reporter = runreport.NewHTTPReporter()
 
 	// Scheduler
 	sched := scheduler.New(runner, store, logger)

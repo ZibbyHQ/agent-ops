@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ZibbyHQ/agent-ops/internal/driver"
+	"github.com/ZibbyHQ/agent-ops/internal/runreport"
 	"github.com/ZibbyHQ/agent-ops/internal/state"
 	"github.com/ZibbyHQ/agent-ops/internal/tool"
 )
@@ -22,6 +23,50 @@ type fakeDriver struct {
 func (d *fakeDriver) Name() string { return d.name }
 func (d *fakeDriver) Run(ctx context.Context, req driver.Request) (driver.Result, error) {
 	return d.run(ctx, req)
+}
+
+// fakeReporter captures the last RunRecord it was handed and signals via done.
+// reportErr, when non-nil, is returned from Report — used to prove a reporter
+// failure never fails the run.
+type fakeReporter struct {
+	mu        sync.Mutex
+	rec       runreport.RunRecord
+	called    bool
+	reportErr error
+	done      chan struct{}
+}
+
+func newFakeReporter(err error) *fakeReporter {
+	return &fakeReporter{reportErr: err, done: make(chan struct{}, 1)}
+}
+
+func (f *fakeReporter) Report(_ context.Context, rec runreport.RunRecord) error {
+	f.mu.Lock()
+	f.rec = rec
+	f.called = true
+	f.mu.Unlock()
+	select {
+	case f.done <- struct{}{}:
+	default:
+	}
+	return f.reportErr
+}
+
+func (f *fakeReporter) record() (runreport.RunRecord, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.rec, f.called
+}
+
+// waitReported blocks until Report fired (the runner reports in a goroutine)
+// or the deadline elapses.
+func (f *fakeReporter) waitReported(t *testing.T) {
+	t.Helper()
+	select {
+	case <-f.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reporter was not called within 2s")
+	}
 }
 
 func openState(t *testing.T) *state.Store {
@@ -271,9 +316,9 @@ func TestFilterFactForPrompt_KeepsRealErrorsAmongWarns(t *testing.T) {
 	// often come prefixed with "npm WARN" so we MUST keep them even though
 	// the line looks like an npm warn at first glance.
 	in := strings.Join([]string{
-		"npm warn deprecated some-old-pkg",            // drop
+		"npm warn deprecated some-old-pkg",             // drop
 		"npm WARN ERESOLVE overriding peer dependency", // keep (eresolve)
-		"npm warn config production not recognized",   // drop (plain npm-warn noise)
+		"npm warn config production not recognized",    // drop (plain npm-warn noise)
 		"command failed: exit code 7",                  // keep (failed + exit code)
 		"ENOENT: no such file or directory",            // keep (enoent)
 	}, "\n")
@@ -373,5 +418,149 @@ func TestRunner_RejectsEmptyName(t *testing.T) {
 	}}, tool.NewRegistry(), st)
 	if _, _, err := r.Run(context.Background(), Spec{Name: "", Prompt: "x"}); err == nil {
 		t.Fatal("expected error for empty name")
+	}
+}
+
+// ─── RunReporter wiring ─────────────────────────────────────────────────────
+
+func TestRunner_ReporterFiresWithCorrectFields(t *testing.T) {
+	ctx := context.Background()
+	st := openState(t)
+	d := &fakeDriver{
+		name: "fake",
+		run: func(_ context.Context, _ driver.Request) (driver.Result, error) {
+			return driver.Result{FinalMessage: "all done", ToolCalls: 3, CostUSDMicro: 12345}, nil
+		},
+	}
+	rep := newFakeReporter(nil)
+	r := NewRunner(d, tool.NewRegistry(), st)
+	r.Reporter = rep
+
+	_, _, err := r.Run(ctx, Spec{
+		Name:    "task-report",
+		Trigger: TriggerSchedule,
+		Prompt:  "do the thing",
+		Model:   "claude-haiku",
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	rep.waitReported(t)
+
+	rec, called := rep.record()
+	if !called {
+		t.Fatal("reporter was not called")
+	}
+	if rec.RunID == "" || !strings.HasPrefix(rec.RunID, "run-") {
+		t.Fatalf("RunID = %q", rec.RunID)
+	}
+	if rec.TaskName != "task-report" {
+		t.Fatalf("TaskName = %q", rec.TaskName)
+	}
+	if rec.Trigger != "schedule" {
+		t.Fatalf("Trigger = %q", rec.Trigger)
+	}
+	if rec.Status != "completed" {
+		t.Fatalf("Status = %q, want completed", rec.Status)
+	}
+	if rec.ToolCalls != 3 {
+		t.Fatalf("ToolCalls = %d", rec.ToolCalls)
+	}
+	if rec.NumTurns != 3 {
+		t.Fatalf("NumTurns = %d, want 3 (reuses ToolCalls)", rec.NumTurns)
+	}
+	if rec.CostUSDMicro != 12345 {
+		t.Fatalf("CostUSDMicro = %d", rec.CostUSDMicro)
+	}
+	if rec.Model != "claude-haiku" {
+		t.Fatalf("Model = %q", rec.Model)
+	}
+	if rec.Result != "all done" {
+		t.Fatalf("Result = %q", rec.Result)
+	}
+	if !strings.Contains(rec.Summary, "all done") {
+		t.Fatalf("Summary = %q", rec.Summary)
+	}
+	if rec.UserPrompt != "do the thing" {
+		t.Fatalf("UserPrompt = %q", rec.UserPrompt)
+	}
+	if rec.SystemPrompt == "" {
+		t.Fatal("SystemPrompt empty — composed prompt should be reported")
+	}
+	if rec.StartedAt == "" || rec.EndedAt == "" {
+		t.Fatalf("timestamps not set: started=%q ended=%q", rec.StartedAt, rec.EndedAt)
+	}
+	if rec.Error != "" {
+		t.Fatalf("Error = %q, want empty on success", rec.Error)
+	}
+}
+
+func TestRunner_NilReporter_NoError(t *testing.T) {
+	st := openState(t)
+	d := &fakeDriver{
+		name: "fake",
+		run: func(context.Context, driver.Request) (driver.Result, error) {
+			return driver.Result{FinalMessage: "ok"}, nil
+		},
+	}
+	r := NewRunner(d, tool.NewRegistry(), st) // Reporter left nil
+	run, _, err := r.Run(context.Background(), Spec{Name: "t", Trigger: TriggerManual, Prompt: "p"})
+	if err != nil {
+		t.Fatalf("Run with nil reporter errored: %v", err)
+	}
+	if run.Status != state.StatusCompleted {
+		t.Fatalf("status = %q, want completed", run.Status)
+	}
+}
+
+func TestRunner_ReporterError_DoesNotFailRun(t *testing.T) {
+	ctx := context.Background()
+	st := openState(t)
+	d := &fakeDriver{
+		name: "fake",
+		run: func(context.Context, driver.Request) (driver.Result, error) {
+			return driver.Result{FinalMessage: "ok", ToolCalls: 1}, nil
+		},
+	}
+	rep := newFakeReporter(errors.New("backend unreachable"))
+	r := NewRunner(d, tool.NewRegistry(), st)
+	r.Reporter = rep
+
+	run, res, err := r.Run(ctx, Spec{Name: "t", Trigger: TriggerManual, Prompt: "p"})
+	if err != nil {
+		t.Fatalf("Run returned error despite reporter failure: %v", err)
+	}
+	if run.Status != state.StatusCompleted {
+		t.Fatalf("status = %q, want completed", run.Status)
+	}
+	if res.FinalMessage != "ok" {
+		t.Fatalf("driver result not passed through: %+v", res)
+	}
+	rep.waitReported(t) // it was still attempted
+}
+
+func TestRunner_ReporterReceivesFailedStatus(t *testing.T) {
+	ctx := context.Background()
+	st := openState(t)
+	d := &fakeDriver{
+		name: "fake",
+		run: func(context.Context, driver.Request) (driver.Result, error) {
+			return driver.Result{}, errors.New("boom")
+		},
+	}
+	rep := newFakeReporter(nil)
+	r := NewRunner(d, tool.NewRegistry(), st)
+	r.Reporter = rep
+
+	if _, _, err := r.Run(ctx, Spec{Name: "t", Trigger: TriggerManual, Prompt: "p"}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	rep.waitReported(t)
+	rec, _ := rep.record()
+	if rec.Status != "failed" {
+		t.Fatalf("Status = %q, want failed", rec.Status)
+	}
+	if !strings.Contains(rec.Error, "boom") {
+		t.Fatalf("Error not surfaced in record: %q", rec.Error)
 	}
 }

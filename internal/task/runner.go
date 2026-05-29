@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/ZibbyHQ/agent-ops/internal/driver"
+	"github.com/ZibbyHQ/agent-ops/internal/runreport"
 	"github.com/ZibbyHQ/agent-ops/internal/state"
 	"github.com/ZibbyHQ/agent-ops/internal/tool"
 )
@@ -35,6 +36,11 @@ type Runner struct {
 	MaxToolCalls int
 	TaskTimeout  time.Duration
 	SystemPrompt string
+
+	// Reporter, when non-nil, receives a structured record of each finished
+	// run (fire-and-forget). Optional dep — a nil Reporter skips reporting.
+	// Set from main.go with an HTTP reporter pointed at the control plane.
+	Reporter runreport.RunReporter
 
 	// In-flight protects against duplicate concurrent runs of the same task
 	// (e.g. a slow run still going when the next cron tick fires). v0.1
@@ -219,6 +225,38 @@ func (r *Runner) Run(ctx context.Context, spec Spec) (state.TaskRun, driver.Resu
 	defer finishCancel()
 	if err := r.State.FinishRun(finishCtx, runID, finalStatus, summary, errMsg, dRes.ToolCalls); err != nil {
 		return run, dRes, fmt.Errorf("task.Run: finish: %w", err)
+	}
+
+	// Report the finished run to the control plane (fire-and-forget). The
+	// terminal state is already durably persisted above, so reporting can run
+	// async in its own goroutine + context — a slow or failing report must
+	// never block or fail the run.
+	if r.Reporter != nil {
+		runEndedAt := time.Now().UTC()
+		rec := runreport.RunRecord{
+			RunID:     runID,
+			TaskName:  spec.Name,
+			Trigger:   string(spec.Trigger),
+			Status:    string(finalStatus),
+			StartedAt: run.StartedAt.Format(time.RFC3339Nano),
+			EndedAt:   runEndedAt.Format(time.RFC3339Nano),
+			ToolCalls: dRes.ToolCalls,
+			// driver.Result has no separate turn count, so reuse ToolCalls as
+			// numTurns (each tool-use iteration is ~one assistant turn).
+			NumTurns:     dRes.ToolCalls,
+			CostUSDMicro: dRes.CostUSDMicro,
+			Model:        spec.Model,
+			SystemPrompt: systemPrompt,
+			UserPrompt:   spec.Prompt,
+			Result:       dRes.FinalMessage,
+			Summary:      summary,
+			Error:        errMsg,
+		}
+		go func() {
+			repCtx, repCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer repCancel()
+			_ = r.Reporter.Report(repCtx, rec)
+		}()
 	}
 
 	out, _ := r.State.GetRun(finishCtx, runID)
