@@ -19,7 +19,14 @@ COPY . .
 ENV CGO_ENABLED=0
 RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" \
-    -o /out/agent-opsd ./cmd/agent-opsd
+    -o /out/agent-opsd ./cmd/agent-opsd \
+ && GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" \
+    -o /out/agent-ops ./cmd/agent-ops
+# agent-ops (the CLI) ships alongside agent-opsd in the image so `docker exec
+# <name> agent-ops status` / `agent-ops mcp token` / `agent-ops doctor` work
+# inside the container without a separate install. The ENTRYPOINT still
+# points at agent-opsd — agent-ops is opt-in.
 
 # ─── runtime stage ─────────────────────────────────────────────────────────
 # Switched off Alpine (musl) to Debian (glibc) so catalog scripts can install
@@ -69,6 +76,7 @@ RUN apt-get update \
 # not pass it on the command line.
 
 COPY --from=build /out/agent-opsd /usr/local/bin/agent-opsd
+COPY --from=build /out/agent-ops /usr/local/bin/agent-ops
 
 COPY config.example.yaml /etc/agent-ops/config.yaml
 

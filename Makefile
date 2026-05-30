@@ -1,11 +1,12 @@
 .PHONY: build test lint vet docker clean
 
 VERSION ?= dev
-BIN := bin/agent-opsd
+BIN_DIR := bin
 
 build:
-	mkdir -p bin
-	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=$(VERSION)" -o $(BIN) ./cmd/agent-opsd
+	mkdir -p $(BIN_DIR)
+	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=$(VERSION)" -o $(BIN_DIR)/agent-opsd ./cmd/agent-opsd
+	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=$(VERSION)" -o $(BIN_DIR)/agent-ops ./cmd/agent-ops
 
 test:
 	go test -race -count=1 ./...
@@ -20,4 +21,4 @@ docker:
 	docker build -t agent-ops:$(VERSION) --build-arg VERSION=$(VERSION) .
 
 clean:
-	rm -rf bin dist
+	rm -rf $(BIN_DIR) dist

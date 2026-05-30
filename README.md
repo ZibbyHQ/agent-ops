@@ -2,26 +2,43 @@
 
 > An autonomous DevOps engineer that lives next to your application.
 
-> ⚠️ **Experimental — DO NOT run on production hosts you can't afford to lose.**
-> This is a research project exploring "what if a small autonomous LLM agent acted as the operator of a single host?" It can run arbitrary shell commands on the box. The API, config schema, on-disk state format, and security model will all change. Pin to a commit if you depend on a specific behavior. We're publishing in the open so the design can be debated; we are NOT promising stability, support, or backwards compatibility at this stage.
+> WARNING — Experimental. Do NOT run on production hosts you can't afford
+> to lose. This is a research project exploring "what if a small autonomous
+> LLM agent acted as the operator of a single host?" — it can run arbitrary
+> shell commands on the box. The API, config schema, on-disk state format,
+> and security model will all change between minor versions. Pin to a
+> commit / tag if you depend on a specific behavior.
 
-`agent-ops` is a small open-source daemon that wraps an LLM agent (Claude today; Codex / Gemini / Ollama on the roadmap) and runs scheduled + on-demand ops tasks on a host. Bring your own API key. Tell it what should be true, in natural language. It uses tools (shell, soon docker / kubectl / http) to keep things that way.
+`agent-ops` is a small open-source daemon that wraps an LLM agent (Claude,
+Codex; Gemini and Ollama next) and runs scheduled + on-demand operations
+tasks on a host. You bring an API key (or an OAuth token); you tell it what
+should be true in natural language; it uses tools (shell today, more on the
+roadmap) to keep things that way.
 
-**Status: experimental (v0.1).** Single-host MVP. The abstractions are cluster-ready (Node + Resource + event-log state) so v1.0 *could* grow into a Kubernetes-flavored multi-node design — that's the hypothesis we're testing, not a delivery commitment.
+**Status: experimental (v0.2).** Single-host MVP. The abstractions are
+cluster-ready so v1.0 *could* grow into a multi-node design — that's the
+hypothesis we're testing, not a delivery commitment.
 
-## How it differs from neighboring tools
+---
 
-| | Terraform | Ansible | Kubernetes operators | **agent-ops** |
-|---|---|---|---|---|
-| Spec language | HCL | YAML | Go types | **Natural language** |
-| Scope | Provisioning | One-shot push | Cluster-scoped reconcile | **Single host, ops continuous** |
-| Decides what to do | You | You | Code | **LLM, per your prompt** |
-| Stays running | No | No | Yes (operator pod) | Yes (sidecar) |
-| Reconciles on cron | No | No | On change | **On cron + on demand** |
+## Install
 
-agent-ops is not a Terraform replacement. It's an extra layer for "things that change too often or too contextually to encode as code" — upgrades, log triage, capacity adjustments, incident response.
+### macOS / Linux — Homebrew
 
-## Quickstart (Docker)
+```bash
+brew install zibbyhq/tap/agent-ops
+```
+
+### Anywhere — tarball
+
+```bash
+# Linux x86_64
+curl -fsSL https://github.com/ZibbyHQ/agent-ops/releases/latest/download/agent-ops_linux_amd64.tar.gz \
+  | sudo tar -xz -C /usr/local/bin
+# Same URL pattern for: agent-ops_linux_arm64 / agent-ops_darwin_amd64 / agent-ops_darwin_arm64
+```
+
+### Docker
 
 ```bash
 docker run -d \
@@ -34,7 +51,149 @@ docker run -d \
   ghcr.io/zibbyhq/agent-ops:latest
 ```
 
-Then point your local AI agent (Claude Code, Cursor, Codex CLI, Gemini CLI) at the daemon's MCP endpoint:
+### Debian / Ubuntu (apt repo deferred)
+
+For now, grab the `.deb` from the [latest GitHub
+Release](https://github.com/ZibbyHQ/agent-ops/releases) and install
+directly:
+
+```bash
+dpkg -i agent-ops_*_linux_amd64.deb
+```
+
+A signed apt repository at `apt.zibby.dev` is on the v0.3 roadmap.
+
+---
+
+## Quickstart
+
+After install, three commands set up the daemon under systemd (Linux) or
+launchd (macOS):
+
+```bash
+sudo agent-ops init        # interactive: provider, token env, optional goal
+sudo agent-ops start       # install service unit + start
+agent-ops status           # check it's alive
+agent-ops logs -f          # tail
+```
+
+Stop / restart / uninstall live where you expect:
+
+```bash
+agent-ops stop
+agent-ops restart
+agent-ops uninstall        # removes unit; --purge to also remove config/state
+```
+
+Diagnose problems:
+
+```bash
+agent-ops doctor
+```
+
+(checks: config valid? API key env set? provider CLI on PATH? state dir
+writable? MCP port free? upstream LLM reachable?)
+
+---
+
+## Quickstart: WordPress + MySQL health monitoring
+
+A concrete scenario — agent-ops keeps a small WordPress install
+self-healing. After `apt install mysql-server wordpress nginx` (or your
+playbook of choice), drop this at `/etc/agent-ops/config.yaml`:
+
+```yaml
+state_dir: /var/lib/agent-ops
+
+agent:
+  provider: claude-cli
+  model: claude-sonnet-4-6
+  api_key_env: CLAUDE_CODE_OAUTH_TOKEN
+  max_tool_calls_per_task: 30
+  task_timeout: 15m
+
+mcp:
+  listen_addr: ":7842"
+  token_env: AGENT_OPS_TOKEN
+
+schedules:
+  - name: hourly_health_check
+    cron: "0 * * * *"
+    prompt: |
+      Verify the WordPress site is responding on port 80 and the MySQL
+      daemon is accepting connections on 3306. If WP is down:
+        1. Check `systemctl status nginx php8.2-fpm mysql`.
+        2. Restart the failed unit with `systemctl restart <name>`.
+        3. Re-curl the site to confirm it's back.
+      If MySQL is down: try restart once; if it doesn't come back,
+      page the operator via the notify-app-down webhook.
+    tools: [shell]
+
+  - name: nightly_db_backup_verify
+    cron: "30 3 * * *"
+    prompt: |
+      Run `mysqldump -u root --all-databases > /var/backups/mysql-$(date +%F).sql`
+      then verify the dump is non-empty and contains the wp_posts table.
+      Rotate dumps older than 14 days. Report the dump size.
+    tools: [shell]
+
+  - name: weekly_security_update
+    cron: "0 4 * * 0"      # Sundays 04:00 UTC
+    prompt: |
+      Run `apt update && apt list --upgradable`. Install all security
+      patches (`apt upgrade -y --only-upgrade $(apt list --upgradable
+      2>/dev/null | grep -i security | cut -d/ -f1)`). After upgrade,
+      curl the WordPress site once to make sure nothing broke. If it
+      did, summarize what package(s) were upgraded and what's broken.
+    tools: [shell]
+```
+
+Then:
+
+```bash
+sudo agent-ops init      # accept defaults (since config exists, it'll ask before overwriting)
+sudo agent-ops start
+```
+
+Now your WordPress will self-heal on minor failures, get backed up nightly,
+and security-patched weekly — and you'll get a notification via your
+configured webhook if anything goes wrong that the agent can't recover from.
+
+### Wiring the notify webhook
+
+Set `AGENT_OPS_NOTIFY_WORKFLOW_ID` in `/etc/agent-ops/agent-ops.env` (read
+by the systemd unit). The scheduler appends a clause to recurring-task
+prompts telling the LLM to shell-out to your notification tool — typically
+the Zibby CLI (`zibby workflow trigger notify-app-down …`) — only after
+recovery attempts have failed. Set it to whatever id your tool expects;
+non-Zibby setups can swap the shell-out for `curl https://hooks.slack.com/…`
+in the prompt directly.
+
+---
+
+## Configuration
+
+A complete `config.yaml` lives at
+[`config.example.yaml`](./config.example.yaml). Schema highlights:
+
+| Section | Required | Purpose |
+|---|---|---|
+| `agent.provider` | yes | `claude` / `claude-cli` / `codex` / `gemini` / `ollama` (last two stubs) |
+| `agent.model` | for claude | Model id (e.g. `claude-sonnet-4-6`) |
+| `agent.api_key_env` | for cloud | Name of env var holding the API key / OAuth token |
+| `schedules[]` | optional | Cron-fired prompts + tool allowlist |
+| `bootstrap` | optional | One-shot prompt run on first daemon start |
+| `mcp.listen_addr` | optional | Defaults to `:7842` |
+
+Per-schedule `model:` overrides the daemon-wide default so you can route
+cheap checks to Haiku and reserve Sonnet for upgrades / incident response.
+
+---
+
+## MCP tool surface
+
+Each daemon exposes a streamable-HTTP MCP server. Point your editor's AI
+chat (Claude Code, Cursor, Codex CLI, Gemini CLI) at it:
 
 ```json
 {
@@ -47,39 +206,7 @@ Then point your local AI agent (Claude Code, Cursor, Codex CLI, Gemini CLI) at t
 }
 ```
 
-Now in your editor's AI chat you can say:
-
-> "Show me what agent-ops is doing right now."
-> "Update the weekly_upgrade task to also notify me on Slack."
-> "Run a one-off cleanup of /tmp on the host."
-
-## Configuration
-
-A complete `config.yaml` lives at [`config.example.yaml`](./config.example.yaml). Highlights:
-
-```yaml
-agent:
-  provider: claude              # v0.1: claude only
-  model: claude-sonnet-4-6
-  api_key_env: ANTHROPIC_API_KEY
-
-mcp:
-  listen_addr: ":7842"
-  token_env: AGENT_OPS_TOKEN
-
-bootstrap:
-  prompt: "Set up this host from scratch..."
-
-schedules:
-  - name: hourly_health_check
-    cron: "0 * * * *"
-    prompt: "Verify the app is reachable..."
-    tools: [shell]
-```
-
-## MCP tool surface
-
-The daemon's MCP server exposes:
+(Grab the token with `agent-ops mcp token`.)
 
 | Tool | Purpose |
 |---|---|
@@ -90,68 +217,104 @@ The daemon's MCP server exposes:
 | `agent_logs` | Per-line log of one run |
 | `host_shell` | Direct shell exec (skip the LLM) |
 
-Remote agents (Claude Code etc.) see all of these. The internal Claude driver sees just the host tools (`shell`) — it picks what to invoke based on the user's prompt.
+---
 
 ## Architecture
 
 ```
-┌── compute host (any Linux box — VPS, EC2, container, Pi)┐
-│  ┌── agent-ops daemon (Go, ~12MB) ──────────────┐       │
-│  │ Scheduler ─► Task Runner ─► Driver (Claude) │       │
-│  │                            │                 │       │
-│  │                            ▼ tool calls      │       │
-│  │                       Tool registry          │       │
-│  │                       (shell, ...)           │       │
-│  │ MCP server (:7842) ◄─ local Claude/Cursor ─► │       │
-│  │ SQLite state (event-log + tables)            │       │
-│  └──────────────────────────────────────────────┘       │
-│  ┌── your application ─────────────────────────┐        │
-│  │ OpenDesign / Gastown / Postgres / whatever │        │
-│  └─────────────────────────────────────────────┘        │
-└─────────────────────────────────────────────────────────┘
+┌── compute host (Linux box, VPS, EC2, container, Pi, …) ────────────┐
+│                                                                    │
+│   ┌── agent-ops daemon (Go, ~15MB) ───────────────────────────┐    │
+│   │                                                            │    │
+│   │   Scheduler  ─►  Task Runner  ─►  Driver (Claude/Codex)   │    │
+│   │                                    │                       │    │
+│   │                                    ▼  tool calls           │    │
+│   │                              Tool registry (shell …)       │    │
+│   │                                                            │    │
+│   │   MCP server (:7842)  ◄── Claude Code / Cursor / Codex     │    │
+│   │   SQLite state (event-log + tables)                        │    │
+│   └───────────────────────────────────────────────────────────┘    │
+│                                                                    │
+│   ┌── your application ──────────────────────────────────────┐    │
+│   │ WordPress / Postgres / n8n / whatever                    │    │
+│   └──────────────────────────────────────────────────────────┘    │
+└────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Single Go binary, ~12MB**. Runs anywhere Linux runs.
-- **SQLite + event log**: every state change is appended to `events` before its table is updated. v1.0's Raft layer will ship the same events to replicas.
-- **Sidecar by design**: doesn't replace your app, lives next to it.
+- **Two binaries**, ~15MB and ~19MB:
+  - `agent-opsd` — the long-running daemon. Started by systemd / launchd.
+  - `agent-ops` — the user-facing CLI (init / start / stop / status / logs / doctor / schedule / mcp).
+- **SQLite + event log** — every state change is appended to `events`
+  before its table is updated. v1.0's Raft layer will ship the same events
+  to replicas without touching domain tables.
+- **Sidecar by design** — doesn't replace your app, lives next to it.
+
+---
 
 ## What's not done yet
 
-- **No clustering**. v0.1 is single-node. Cluster mode (Raft consensus, pilot/worker, leader election) is on the roadmap.
-- **One LLM driver** (Claude). Codex / Gemini / Ollama are stub interfaces — implementations land in v0.2.
-- **One tool** (shell). `http`, `fs`, `docker`, `kubectl`, `git` are in the design but not implemented.
-- **No telemetry export**. Internal logs only. OTel exporter in v0.2.
-- **No outbound RPC to a control plane**. Designed for it (Zibby's hosted version uses outbound long-poll) but the MVP listens only.
-- **No token rotation**. v0.1 mints once on first boot; restart with a new env var to rotate.
+- **No clustering**. v0.2 is single-node. Cluster mode (Raft consensus,
+  pilot/worker, leader election) is on the v0.5 roadmap.
+- **Three LLM drivers** (Claude REST API, Claude Code CLI, OpenAI Codex
+  CLI). Gemini / Ollama are stub interfaces.
+- **One tool** (`shell`). `http`, `fs`, `docker`, `kubectl`, `git` are in
+  the design but not implemented — agent-ops talks to vendor CLIs via
+  shell-out for now (e.g. the Zibby flavour image ships `@zibby/cli` so the
+  agent can run `zibby workflow trigger …` directly).
+- **No telemetry export**. Internal slog only. OTel exporter in v0.3.
+- **No apt repo**. `.deb` packages ship on every GitHub Release —
+  `apt.zibby.dev` is v0.3.
+- **No Windows**. Service install supports systemd + launchd only.
 
-See [`ROADMAP.md`](./ROADMAP.md) for the post-v0.1 plan.
+See [`ROADMAP.md`](./ROADMAP.md) for the post-v0.2 plan.
+
+---
 
 ## Relationship to Zibby
 
-This is part of [Zibby](https://zibby.dev)'s open ecosystem. The Zibby control plane uses `agent-ops` as the sidecar inside every hosted application instance, and the Zibby CLI / MCP (`@zibby/mcp-cli`) provisions instances + handles token lifecycle. Run agent-ops without Zibby too: it has no required runtime dependency on us.
+This is part of [Zibby](https://zibby.dev)'s open ecosystem. The Zibby
+control plane uses `agent-ops` as the sidecar inside every hosted
+application instance, and the Zibby CLI / MCP (`@zibby/mcp-cli`) provisions
+instances + handles token lifecycle. Run agent-ops standalone too: it has
+no required runtime dependency on Zibby.
+
+---
 
 ## Contributing
 
-PRs welcome. We require a [CLA](./CONTRIBUTING.md) for non-trivial contributions so the project stays cleanly Apache-2.0 licensable.
+PRs welcome. We require a [CLA](./CONTRIBUTING.md) for non-trivial
+contributions so the project stays cleanly Apache-2.0 licensable.
 
 For security reports, see [`SECURITY.md`](./SECURITY.md).
+
+---
 
 ## Experiment, not a product
 
 This repo is an active design experiment. Specifically we want to find out:
 
-1. **Does an LLM agent on a single host actually replace a human ops person for small workloads?** Or does it churn out plausible-looking actions that quietly drift state.
-2. **Is "natural language mission journal" a stable abstraction?** Or do users want stricter Resource specs (Kubernetes-CRD style)?
-3. **Where's the right line between in-process tools (`shell`) and outbound integrations (Slack, GitHub, …)?** And how does the agent learn that line.
-4. **How does the cluster shape land?** v0.1 reserves Node + Resource + event-log seams for a future Raft pilot/worker design — we want to know if that shape survives real multi-node usage.
+1. Does an LLM agent on a single host actually replace a human ops person
+   for small workloads? Or does it churn out plausible-looking actions that
+   quietly drift state.
+2. Is "natural language mission journal" a stable abstraction? Or do users
+   want stricter Resource specs (Kubernetes-CRD style)?
+3. Where's the right line between in-process tools (`shell`) and outbound
+   integrations (Slack, GitHub, …)? And how does the agent learn that line.
+4. How does the cluster shape land? v0.x reserves Node + Resource +
+   event-log seams for a future Raft pilot/worker design — we want to know
+   if that shape survives real multi-node usage.
 
-If those questions don't pan out, the project may pivot or shut down. If they do, v1.0 freezes a stable API.
+If those questions don't pan out, the project may pivot or shut down. If
+they do, v1.0 freezes a stable API.
 
 In the meantime:
 - Expect breaking changes between every minor version
 - Expect bugs in the agent's judgment, not just its code
 - Don't point this at anything you can't lose
-- Telemetry from your runs (when implemented) goes only to your own backend — we are not collecting anything
+- Telemetry from your runs (when implemented) goes only to your own
+  backend — we are not collecting anything
+
+---
 
 ## License
 

@@ -1,0 +1,172 @@
+# Copyright 2026 Zibby Lab. Apache-2.0.
+#
+# goreleaser v2 config. Triggered by `git push tag v*.*.*` (see
+# .github/workflows/release.yml). Produces:
+#
+#   - 4 cross-compiled binary archives (.tar.gz) covering Linux + Mac on
+#     amd64 + arm64.
+#   - 2 Debian .deb packages (linux/amd64, linux/arm64).
+#   - SHA256SUMS.txt — checksums for everything in the release.
+#   - GitHub Release with all of the above attached.
+#   - A bumped homebrew Formula PRed against ZibbyHQ/homebrew-tap.
+#
+# The existing GHCR Docker push (`docker` job in release.yml) is intentionally
+# left in place rather than folded in here — goreleaser's docker builder
+# doesn't add anything the existing buildx job doesn't already do, and the
+# old job is the one whose image hash is wired into every Fargate task def.
+version: 2
+
+project_name: agent-ops
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  # The daemon binary — what systemd / launchd execute.
+  - id: agent-opsd
+    main: ./cmd/agent-opsd
+    binary: agent-opsd
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      # `version` const lives in cmd/agent-opsd/main.go; the release pipeline
+      # bakes the git tag (sans leading v) here so `agent-opsd version` prints
+      # the real release number, not the source-tree placeholder "0.2.0".
+      - -s -w -X main.version={{.Version}}
+
+  # The user-facing CLI — what `brew install` puts on $PATH.
+  - id: agent-ops
+    main: ./cmd/agent-ops
+    binary: agent-ops
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - id: combined
+    # Ship one tarball per (os, arch) carrying both binaries — that's what
+    # `curl … | tar -xz -C /usr/local/bin` wants. Default name template is
+    # `{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}` which matches the install
+    # URL embedded in the README ("…/agent-ops_linux_amd64.tar.gz").
+    ids:
+      - agent-opsd
+      - agent-ops
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+      - config.example.yaml
+
+nfpms:
+  # .deb packages, linux only. apt repo distribution is deferred (phase 2 —
+  # see OSS_DISTRIBUTION_PLAN.md); for v0.2 users grab the .deb from the
+  # GitHub Release directly and `dpkg -i agent-ops_*.deb`.
+  - id: agent-ops-deb
+    package_name: agent-ops
+    file_name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    ids:
+      - agent-opsd
+      - agent-ops
+    vendor: Zibby Lab
+    homepage: https://github.com/ZibbyHQ/agent-ops
+    maintainer: Zibby Lab <oss@zibby.dev>
+    description: |-
+      Autonomous DevOps engineer for a single host.
+      agent-ops runs a small LLM-backed agent next to your
+      application, firing scheduled and on-demand ops tasks
+      using a configurable provider (Claude / Codex / Ollama).
+    license: Apache-2.0
+    formats:
+      - deb
+    bindir: /usr/local/bin
+    section: utils
+    contents:
+      - src: config.example.yaml
+        dst: /etc/agent-ops/config.example.yaml
+        type: config
+      - src: LICENSE
+        dst: /usr/share/doc/agent-ops/LICENSE
+
+homebrew_casks:
+  # Homebrew tap auto-PR. goreleaser commits the rendered cask to the
+  # `homebrew-tap` repo on the configured GitHub org — operator picks it up
+  # and merges. The operator MUST have already created
+  # github.com/ZibbyHQ/homebrew-tap manually (see dist/homebrew-tap/ in this
+  # repo for the stub layout) and granted the release workflow a fine-grained
+  # PAT exposed as HOMEBREW_TAP_TOKEN.
+  #
+  # Note: we use the modern homebrew_casks: form (brews: was deprecated in
+  # goreleaser v2.16). For a binary-only CLI like ours, the rendered cask
+  # is exactly equivalent to the old Formula — `brew install` still works.
+  - name: agent-ops
+    ids:
+      - combined
+    repository:
+      owner: ZibbyHQ
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    commit_author:
+      name: zibby-bot
+      email: oss@zibby.dev
+    homepage: https://github.com/ZibbyHQ/agent-ops
+    description: Autonomous DevOps engineer for a single host.
+    license: Apache-2.0
+    binaries:
+      - agent-ops
+      - agent-opsd
+
+checksum:
+  name_template: "SHA256SUMS.txt"
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^chore:"
+      - "^test:"
+      - "^ci:"
+
+release:
+  github:
+    owner: ZibbyHQ
+    name: agent-ops
+  prerelease: auto
+  draft: false
+  name_template: "v{{.Version}}"
+  header: |
+    ## agent-ops v{{.Version}}
+
+    Install:
+
+    ```bash
+    brew install zibbyhq/tap/agent-ops               # macOS / Linuxbrew
+    curl -fsSL https://github.com/ZibbyHQ/agent-ops/releases/download/v{{.Version}}/agent-ops_linux_amd64.tar.gz \
+      | sudo tar -xz -C /usr/local/bin
+    ```
+
+    Then run `agent-ops init` to set up.

@@ -1,0 +1,28 @@
+[Unit]
+Description=agent-ops — autonomous DevOps engineer
+Documentation=https://github.com/ZibbyHQ/agent-ops
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{.User}}
+Group={{.Group}}
+ExecStart={{.ExecPath}} --config {{.ConfigPath}}
+Restart=on-failure
+RestartSec=5s
+# Environment file is optional — operators can drop secrets (API keys,
+# AGENT_OPS_TOKEN) here without editing the unit. Path is fixed by convention.
+EnvironmentFile=-/etc/agent-ops/agent-ops.env
+StateDirectory=agent-ops
+StateDirectoryMode=0700
+StandardOutput=append:{{.LogPath}}
+StandardError=append:{{.LogPath}}
+
+# Light sandbox. Don't go further (e.g. ProtectHome=yes) because the agent's
+# whole job is poking at the host — over-confinement defeats the purpose.
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
