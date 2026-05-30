@@ -262,6 +262,26 @@ func TestRunner_MissionPrependedToSystemPrompt(t *testing.T) {
 	}
 }
 
+// TestDefaultSystemPrompt_HasAutonomousModeClause pins the imperative
+// "never ask the operator for clarification" wording in the baked-in system
+// prompt. A regression here means the agent could revert to asking follow-up
+// questions on a cron tick where no human is listening.
+func TestDefaultSystemPrompt_HasAutonomousModeClause(t *testing.T) {
+	required := []string{
+		"running autonomously",
+		"NO human in the",
+		"Never ask the operator for clarification",
+		"DISCOVER it via shell",
+		"printenv",
+		"unrecoverable",
+	}
+	for _, needle := range required {
+		if !strings.Contains(defaultSystemPrompt, needle) {
+			t.Fatalf("defaultSystemPrompt missing required clause %q", needle)
+		}
+	}
+}
+
 func TestRunner_NoMission_UsesBaseSystemPromptOnly(t *testing.T) {
 	ctx := context.Background()
 	st := openState(t)

@@ -68,7 +68,15 @@ to satisfy them. Be concise. Prefer read-only inspection before mutating.
 When a tool fails, recover or report — do not retry blindly. End the run
 when the user instruction is satisfied OR when you genuinely cannot make
 further progress; explain either outcome in plain English.
-If a KNOWN FACT shows "(N lines filtered as npm-warn noise — call fact_inspect(<index>) to see full)", call that tool only when a fact's exit code or error message warrants deeper inspection; routine npm-warn-only facts can be ignored.`
+If a KNOWN FACT shows "(N lines filtered as npm-warn noise — call fact_inspect(<index>) to see full)", call that tool only when a fact's exit code or error message warrants deeper inspection; routine npm-warn-only facts can be ignored.
+
+You are running autonomously on a scheduled cron tick. There is NO human in the
+loop to answer follow-up questions. Never ask the operator for clarification.
+If you need a value (instance id, app type, port, process name, config path),
+DISCOVER it via shell — ` + "`printenv`" + `, ` + "`ps`" + `, ` + "`ss -tlnp`" + `, ` + "`cat /etc/agent-ops/...`" + `,
+` + "`curl 127.0.0.1:<port>`" + ` — then act. Only call the notification tool (if one
+is configured — see USER PROMPT) when you have ACTED and the issue is
+unrecoverable.`
 
 // composeSystemPrompt prepends the instance Mission (charter + known facts)
 // to the runner's base system prompt. This is what gives the agent its

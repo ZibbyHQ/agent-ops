@@ -182,6 +182,22 @@ func (c *Config) applyDefaults() {
 		}
 		c.Bootstrap.Prompt = p
 	}
+
+	// AGENT_OPS_HEALTH_CHECK_PROMPT env override. Same pattern as the
+	// bootstrap override above: the control plane injects a fully-formed,
+	// per-app concrete prompt ("Verify n8n on port 5678…") at deploy time
+	// without re-baking config.yaml. Only replaces the prompt for an
+	// EXISTING `hourly_health_check` schedule — we don't synthesize a new
+	// schedule from env alone, because the cron expression + tool allowlist
+	// belong in the baked config where the operator can review them.
+	if p := strings.TrimSpace(os.Getenv("AGENT_OPS_HEALTH_CHECK_PROMPT")); p != "" {
+		for i := range c.Schedules {
+			if c.Schedules[i].Name == "hourly_health_check" {
+				c.Schedules[i].Prompt = p
+				break
+			}
+		}
+	}
 }
 
 var validProviders = map[string]bool{

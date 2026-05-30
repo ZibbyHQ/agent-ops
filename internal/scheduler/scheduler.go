@@ -17,6 +17,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"strings"
 	"sync"
 
 	"github.com/robfig/cron/v3"
@@ -167,7 +169,7 @@ func (s *Scheduler) makeJob(t state.Task) func() {
 		_, _, runErr := s.runner.Run(ctx, task.Spec{
 			Name:    cur.Name,
 			Trigger: task.TriggerSchedule,
-			Prompt:  cur.Prompt,
+			Prompt:  appendNotifyClause(cur.Prompt),
 			Tools:   cur.Tools,
 			Model:   s.modelFor(cur.Name),
 		})
@@ -175,6 +177,31 @@ func (s *Scheduler) makeJob(t state.Task) func() {
 			s.log.Error("scheduler: run failed", "name", cur.Name, "error", runErr)
 		}
 	}
+}
+
+// appendNotifyClause optionally appends a notification-tool instruction to the
+// user prompt, controlled by the AGENT_OPS_NOTIFY_WORKFLOW_ID env var. When
+// the env is unset (or blank after trim) the prompt is returned unchanged so
+// non-Zibby deploys see zero behavior change. When set, the LLM is told to
+// call `zibby_workflow` with the configured workflow id ONLY after attempting
+// recovery — matching the autonomous-mode contract in defaultSystemPrompt.
+//
+// Exposed as a package-level function (not a method) so it composes cleanly
+// with whichever Spec.Prompt source is in use — schedule tick, RunNow, future
+// callers — without each call site needing to know about the env var.
+func appendNotifyClause(prompt string) string {
+	wfID := strings.TrimSpace(os.Getenv("AGENT_OPS_NOTIFY_WORKFLOW_ID"))
+	if wfID == "" {
+		return prompt
+	}
+	clause := "\n\nIf the application is down AND you cannot recover it (soft-restart did not\n" +
+		"bring it back), call the MCP tool `zibby_workflow` with arguments:\n" +
+		"  { workflow_id: \"" + wfID + "\",\n" +
+		"    input: { instance_id: <$INSTANCE_ID via printenv>,\n" +
+		"             error: \"<your one-line summary>\",\n" +
+		"             severity: \"high\" } }\n" +
+		"so the operator gets paged."
+	return prompt + clause
 }
 
 // SetTask atomically upserts + re-registers (or removes) a task. Called by the
@@ -215,7 +242,7 @@ func (s *Scheduler) RunNow(ctx context.Context, taskName, overridePrompt string)
 	run, _, err := s.runner.Run(ctx, task.Spec{
 		Name:    t.Name,
 		Trigger: task.TriggerManual,
-		Prompt:  prompt,
+		Prompt:  appendNotifyClause(prompt),
 		Tools:   t.Tools,
 		Model:   s.modelFor(t.Name),
 	})

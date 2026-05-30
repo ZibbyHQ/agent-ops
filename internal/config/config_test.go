@@ -205,6 +205,73 @@ schedules:
 	}
 }
 
+// TestParse_HealthCheckPromptEnvOverride_Unset pins the backward-compat path:
+// when AGENT_OPS_HEALTH_CHECK_PROMPT is empty, the baked config.yaml prompt
+// for hourly_health_check survives untouched. Required so existing deploys
+// without the new env var see zero behavior change.
+func TestParse_HealthCheckPromptEnvOverride_Unset(t *testing.T) {
+	t.Setenv("AGENT_OPS_HEALTH_CHECK_PROMPT", "")
+	yaml := `
+agent:
+  provider: claude
+  model: c
+  api_key_env: K
+schedules:
+  - name: hourly_health_check
+    cron: "@hourly"
+    prompt: "baked check prompt"
+    tools: [shell]
+`
+	c, err := Parse(strings.NewReader(yaml))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(c.Schedules) != 1 {
+		t.Fatalf("want 1 schedule, got %d", len(c.Schedules))
+	}
+	if c.Schedules[0].Prompt != "baked check prompt" {
+		t.Errorf("Prompt = %q, want unchanged baked prompt", c.Schedules[0].Prompt)
+	}
+}
+
+// TestParse_HealthCheckPromptEnvOverride_Set pins the override path: when
+// AGENT_OPS_HEALTH_CHECK_PROMPT is non-empty, the baked prompt for the
+// hourly_health_check schedule is replaced with the env value. This is the
+// hook the control plane uses to ship a per-app concrete prompt ("Verify
+// n8n on port 5678…") without re-baking config.yaml.
+func TestParse_HealthCheckPromptEnvOverride_Set(t *testing.T) {
+	t.Setenv("AGENT_OPS_HEALTH_CHECK_PROMPT", "Verify n8n on port 5678 is responding.")
+	yaml := `
+agent:
+  provider: claude
+  model: c
+  api_key_env: K
+schedules:
+  - name: hourly_health_check
+    cron: "@hourly"
+    prompt: "baked check prompt"
+    tools: [shell]
+  - name: weekly_upgrade
+    cron: "@weekly"
+    prompt: "upgrade prompt"
+    tools: [shell]
+`
+	c, err := Parse(strings.NewReader(yaml))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(c.Schedules) != 2 {
+		t.Fatalf("want 2 schedules, got %d", len(c.Schedules))
+	}
+	if c.Schedules[0].Prompt != "Verify n8n on port 5678 is responding." {
+		t.Errorf("hourly_health_check.Prompt = %q, want env override", c.Schedules[0].Prompt)
+	}
+	// weekly_upgrade must be left alone — env only targets hourly_health_check.
+	if c.Schedules[1].Prompt != "upgrade prompt" {
+		t.Errorf("weekly_upgrade.Prompt = %q, want untouched", c.Schedules[1].Prompt)
+	}
+}
+
 func TestParse_AllowsReservedTopLevelKeys(t *testing.T) {
 	// Future v0.x features should not break v0.1 config files.
 	yaml := validYAML + `
