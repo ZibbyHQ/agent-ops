@@ -29,10 +29,37 @@ hypothesis we're testing, not a delivery commitment.
 brew install zibbyhq/tap/agent-ops
 ```
 
-### Anywhere — tarball
+### Debian / Ubuntu — APT (signed repo on dl.zibby.app)
 
 ```bash
-# Linux x86_64
+sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://dl.zibby.app/apt/key.gpg \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/zibby.gpg
+echo "deb [signed-by=/etc/apt/keyrings/zibby.gpg] https://dl.zibby.app/apt stable main" \
+  | sudo tee /etc/apt/sources.list.d/zibby.list
+sudo apt update && sudo apt install agent-ops
+```
+
+Subsequent `apt upgrade` runs pick up new releases as they ship.
+
+### Anywhere — direct tarball (dl.zibby.app)
+
+```bash
+# Auto-detects OS + arch from `uname`.
+curl -fsSL "https://dl.zibby.app/agent-ops/latest/agent-ops_$(uname -s | tr A-Z a-z)_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" \
+  | sudo tar -xz -C /usr/local/bin
+
+# Or pin a specific version:
+curl -fsSL https://dl.zibby.app/agent-ops/v0.2.0/agent-ops_linux_amd64.tar.gz \
+  | sudo tar -xz -C /usr/local/bin
+```
+
+### Anywhere — direct tarball (GitHub Releases)
+
+If you'd rather not go through dl.zibby.app, every release is also
+attached directly to its GitHub Release:
+
+```bash
 curl -fsSL https://github.com/ZibbyHQ/agent-ops/releases/latest/download/agent-ops_linux_amd64.tar.gz \
   | sudo tar -xz -C /usr/local/bin
 # Same URL pattern for: agent-ops_linux_arm64 / agent-ops_darwin_amd64 / agent-ops_darwin_arm64
@@ -50,18 +77,6 @@ docker run -d \
   -e AGENT_OPS_TOKEN=$(openssl rand -hex 32) \
   ghcr.io/zibbyhq/agent-ops:latest
 ```
-
-### Debian / Ubuntu (apt repo deferred)
-
-For now, grab the `.deb` from the [latest GitHub
-Release](https://github.com/ZibbyHQ/agent-ops/releases) and install
-directly:
-
-```bash
-dpkg -i agent-ops_*_linux_amd64.deb
-```
-
-A signed apt repository at `apt.zibby.dev` is on the v0.3 roadmap.
 
 ---
 
@@ -262,8 +277,6 @@ chat (Claude Code, Cursor, Codex CLI, Gemini CLI) at it:
   shell-out for now (e.g. the Zibby flavour image ships `@zibby/cli` so the
   agent can run `zibby workflow trigger …` directly).
 - **No telemetry export**. Internal slog only. OTel exporter in v0.3.
-- **No apt repo**. `.deb` packages ship on every GitHub Release —
-  `apt.zibby.dev` is v0.3.
 - **No Windows**. Service install supports systemd + launchd only.
 
 See [`ROADMAP.md`](./ROADMAP.md) for the post-v0.2 plan.

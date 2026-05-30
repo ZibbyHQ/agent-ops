@@ -109,13 +109,26 @@ homebrew_casks:
   # Homebrew tap auto-PR. goreleaser commits the rendered cask to the
   # `homebrew-tap` repo on the configured GitHub org — operator picks it up
   # and merges. The operator MUST have already created
-  # github.com/ZibbyHQ/homebrew-tap manually (see dist/homebrew-tap/ in this
+  # github.com/ZibbyHQ/homebrew-tap manually (see homebrew-tap-stub/ in this
   # repo for the stub layout) and granted the release workflow a fine-grained
   # PAT exposed as HOMEBREW_TAP_TOKEN.
   #
   # Note: we use the modern homebrew_casks: form (brews: was deprecated in
   # goreleaser v2.16). For a binary-only CLI like ours, the rendered cask
   # is exactly equivalent to the old Formula — `brew install` still works.
+  #
+  # URL retarget (Phase 2): the cask's `url:` and `version:` together tell
+  # Homebrew where to fetch the tarball from. We point it at dl.zibby.app
+  # rather than GitHub Releases because:
+  #   - dl.zibby.app is CloudFront-backed and faster than GH Releases
+  #     for global users.
+  #   - GH Releases rate-limits unauthenticated downloads; CloudFront does
+  #     not.
+  #   - It keeps the install path inside Zibby's control plane so we can
+  #     observe install volume / invalidate a bad release without GH support.
+  # The `scripts/publish-binaries.mjs` script (Phase 2) mirrors every
+  # goreleaser-built tarball to s3://<bucket>/agent-ops/v<ver>/ — that's
+  # what this URL resolves to.
   - name: agent-ops
     ids:
       - combined
@@ -124,6 +137,8 @@ homebrew_casks:
       name: homebrew-tap
       branch: main
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    url:
+      template: "https://dl.zibby.app/agent-ops/v{{ .Version }}/{{ .ArtifactName }}"
     commit_author:
       name: zibby-bot
       email: oss@zibby.dev

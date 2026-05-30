@@ -1,10 +1,15 @@
 # Binaries
 bin/
-dist/
 *.exe
 *.dll
 *.so
 *.dylib
+
+# goreleaser output dir — everything under dist/ is generated EXCEPT the
+# checked-in APT signing-key payload (scripts/publish-apt.mjs reads it
+# from dist/apt/ and uploads it to dl.zibby.app/apt/key.gpg).
+dist/*
+!dist/apt/
 
 # Test artifacts
 *.test
