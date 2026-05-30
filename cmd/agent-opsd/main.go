@@ -48,7 +48,7 @@ import (
 )
 
 // version is set via -ldflags by the release pipeline.
-var version = "0.1.24"
+var version = "0.1.25"
 
 func main() {
 	// Subcommand routing: `agent-opsd version` short-circuits config load.
@@ -94,13 +94,14 @@ func run(cfgPath string, logger *slog.Logger) error {
 	// Tools
 	tools := tool.NewRegistry()
 	tools.MustRegister(tool.NewShellTool())
-	// zibby_workflow closes the agent→user comm loop: the LLM can fire
-	// a user-defined Zibby workflow (Slack notify, page on-call, open
-	// Jira ticket, etc.) when shell evidence warrants. The tool is a
-	// no-op when ZIBBY_API_BASE_URL / ZIBBY_PAT_TOKEN / ZIBBY_PROJECT_ID
-	// aren't set, so non-Zibby deployments don't see surprise failures.
-	tools.MustRegister(tool.NewZibbyWorkflowTool())
-	// (v0.1 ships shell + zibby_workflow; fs/http/docker land in v0.2)
+	// v0.1 ships shell only — pure OSS daemon. Vendor-coupled integrations
+	// (Slack, Jira, vendor APIs, etc.) belong in a flavoured image that
+	// installs the vendor's CLI and lets the agent shell-out to it. The
+	// reference example is the Zibby flavour image (zibby-agent), which
+	// pulls this base image and adds `@zibby/cli` so the LLM can run
+	// `zibby workflow trigger …` via the shell tool — single source of
+	// truth for the Zibby API, no Go-side drift twin.
+	// fs/http/docker tools land in v0.2.
 
 	// Driver
 	d, err := buildDriver(cfg)

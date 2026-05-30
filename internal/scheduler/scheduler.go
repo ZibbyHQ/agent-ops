@@ -183,8 +183,14 @@ func (s *Scheduler) makeJob(t state.Task) func() {
 // user prompt, controlled by the AGENT_OPS_NOTIFY_WORKFLOW_ID env var. When
 // the env is unset (or blank after trim) the prompt is returned unchanged so
 // non-Zibby deploys see zero behavior change. When set, the LLM is told to
-// call `zibby_workflow` with the configured workflow id ONLY after attempting
-// recovery — matching the autonomous-mode contract in defaultSystemPrompt.
+// shell-out to `zibby workflow trigger` with the configured workflow id ONLY
+// after attempting recovery — matching the autonomous-mode contract in
+// defaultSystemPrompt.
+//
+// We intentionally shell-out (rather than expose a Go-side MCP tool) so the
+// Zibby API contract has exactly one source of truth: the @zibby/cli package
+// installed in the Zibby flavour image. This eliminates the drift twin we used
+// to maintain in internal/tool/zibby_workflow.go.
 //
 // Exposed as a package-level function (not a method) so it composes cleanly
 // with whichever Spec.Prompt source is in use — schedule tick, RunNow, future
@@ -195,11 +201,11 @@ func appendNotifyClause(prompt string) string {
 		return prompt
 	}
 	clause := "\n\nIf the application is down AND you cannot recover it (soft-restart did not\n" +
-		"bring it back), call the MCP tool `zibby_workflow` with arguments:\n" +
-		"  { workflow_id: \"" + wfID + "\",\n" +
-		"    input: { instance_id: <$INSTANCE_ID via printenv>,\n" +
-		"             error: \"<your one-line summary>\",\n" +
-		"             severity: \"high\" } }\n" +
+		"bring it back), run the shell command:\n" +
+		"  zibby workflow trigger " + wfID + " \\\n" +
+		"    --input instance_id=\"$INSTANCE_ID\" \\\n" +
+		"    --input error=\"<your one-line summary>\" \\\n" +
+		"    --input severity=\"high\"\n" +
 		"so the operator gets paged."
 	return prompt + clause
 }

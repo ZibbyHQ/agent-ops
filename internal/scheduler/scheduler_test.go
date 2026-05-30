@@ -32,8 +32,8 @@ func TestAppendNotifyClause_EnvSet_AppendsClauseWithID(t *testing.T) {
 	if !strings.Contains(out, "wf_abc123") {
 		t.Fatalf("appended clause missing workflow id:\n%s", out)
 	}
-	if !strings.Contains(out, "zibby_workflow") {
-		t.Fatalf("appended clause should reference zibby_workflow tool:\n%s", out)
+	if !strings.Contains(out, "zibby workflow trigger") {
+		t.Fatalf("appended clause should shell out to `zibby workflow trigger`:\n%s", out)
 	}
 	if !strings.Contains(out, "severity") {
 		t.Fatalf("appended clause missing severity field:\n%s", out)

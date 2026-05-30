@@ -66,15 +66,13 @@ bootstrap:
 # to taste — agent-ops will reconcile on restart.
 #
 # Tool allowlist:
-#   - `shell`          — POSIX shell on the host. Always available.
-#   - `zibby_workflow` — Trigger a user-defined Zibby Cloud workflow
-#                        (Slack notify, page on-call, open Jira, etc.)
-#                        Requires ZIBBY_API_BASE_URL, ZIBBY_PAT_TOKEN,
-#                        and ZIBBY_PROJECT_ID env vars. When the daemon
-#                        runs inside a Zibby-managed Fargate task the
-#                        platform sets these automatically; outside that
-#                        environment the tool no-ops (so the LLM can
-#                        fall back to logging).
+#   - `shell` — POSIX shell on the host. Always available.
+#
+# Vendor integrations (Slack notify, page on-call, open Jira, etc.) are
+# done by installing the vendor CLI in a flavoured image and letting the
+# agent shell-out to it. The reference example is the Zibby flavour image
+# which adds `@zibby/cli`; the agent runs `zibby workflow trigger <id>`
+# via the shell tool. Single source of truth, no Go-side drift twin.
 schedules:
   - name: hourly_health_check
     cron: "0 * * * *"
@@ -83,13 +81,14 @@ schedules:
     prompt: |
       Verify the application is responding on its expected port.
       If it's down, try `pkill -SIGHUP <process>` to soft-restart and
-      re-check. If the soft restart doesn't bring it back, call
-      zibby_workflow with workflow="notify-app-down" and input:
-        {"instance_id": "$INSTANCE_ID",
-         "error": "<one-line summary>",
-         "severity": "high"}
-      so the operator gets paged. Report status.
-    tools: [shell, zibby_workflow]
+      re-check. If the soft restart doesn't bring it back, shell-out to
+      your notification CLI (e.g. on Zibby flavour images:
+        zibby workflow trigger notify-app-down \
+          --input instance_id="$INSTANCE_ID" \
+          --input error="<one-line summary>" \
+          --input severity="high"
+      ) so the operator gets paged. Report status.
+    tools: [shell]
 
   - name: weekly_upgrade
     cron: "0 9 * * 1"        # Mondays 09:00 UTC
@@ -103,7 +102,8 @@ schedules:
         2. Pull the new version.
         3. Run smoke tests.
         4. If anything fails, roll back and explain what went wrong.
-           Then call zibby_workflow with workflow="notify-upgrade-failed"
-           and input describing the failure so the on-call sees it.
+           Then shell-out to your notification CLI (e.g. on Zibby flavour
+           images: `zibby workflow trigger notify-upgrade-failed
+           --input error="…"`) so the on-call sees it.
         5. If everything passes, summarize what changed.
-    tools: [shell, zibby_workflow]
+    tools: [shell]

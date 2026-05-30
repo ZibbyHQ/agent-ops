@@ -4,8 +4,8 @@
 // the Zibby control plane, so the "Agent activity" UI can render runs from a
 // durable DynamoDB table instead of grepping CloudWatch logs.
 //
-// The push is outbound (like register-port / zibby_workflow), so it doesn't
-// depend on the ALB `/_zibby_ops/*` proxy path. It is strictly
+// The push is outbound (like register-port), so it doesn't depend on the
+// ALB `/_zibby_ops/*` proxy path. It is strictly
 // fire-and-forget: the run's terminal state is already persisted in SQLite
 // before we report, so a failed/blocked report must NEVER fail or stall the
 // run. On error we log and move on.
@@ -57,9 +57,10 @@ type RunReporter interface {
 // `Authorization: Bearer ${AGENT_OPS_TOKEN}`.
 //
 // It is a no-op (Report returns nil immediately) when ANY of
-// ZIBBY_API_BASE_URL / INSTANCE_ID / AGENT_OPS_TOKEN is unset — mirroring the
-// no-op-when-unconfigured pattern in internal/tool/zibby_workflow.go so a
-// non-Zibby (or half-wired) deployment never accidentally calls a wrong API.
+// ZIBBY_API_BASE_URL / INSTANCE_ID / AGENT_OPS_TOKEN is unset — the same
+// no-op-when-unconfigured guard agent-ops uses for all vendor-coupled
+// integrations, so a non-Zibby (or half-wired) deployment never
+// accidentally calls a wrong API.
 type HTTPReporter struct {
 	// HTTPClient is used for the outbound POST. Override in tests.
 	HTTPClient *http.Client
@@ -108,9 +109,9 @@ func (r *HTTPReporter) Report(ctx context.Context, rec RunRecord) error {
 	instanceID := strings.TrimSpace(env("INSTANCE_ID"))
 	token := strings.TrimSpace(env("AGENT_OPS_TOKEN"))
 
-	// No-op when unconfigured — same gate as zibby_workflow. Silent: a
-	// non-Zibby deployment reporting nothing is the expected steady state,
-	// not a warning.
+	// No-op when unconfigured — vendor-coupled push is silently disabled.
+	// A non-Zibby deployment reporting nothing is the expected steady
+	// state, not a warning.
 	if baseURL == "" || instanceID == "" || token == "" {
 		return nil
 	}
