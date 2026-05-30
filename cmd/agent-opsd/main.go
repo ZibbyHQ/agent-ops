@@ -38,6 +38,7 @@ import (
 	"github.com/ZibbyHQ/agent-ops/internal/driver"
 	"github.com/ZibbyHQ/agent-ops/internal/driver/claude"
 	"github.com/ZibbyHQ/agent-ops/internal/driver/claudecli"
+	"github.com/ZibbyHQ/agent-ops/internal/driver/codex"
 	"github.com/ZibbyHQ/agent-ops/internal/node"
 	"github.com/ZibbyHQ/agent-ops/internal/runreport"
 	"github.com/ZibbyHQ/agent-ops/internal/scheduler"
@@ -47,7 +48,7 @@ import (
 )
 
 // version is set via -ldflags by the release pipeline.
-var version = "0.1.22"
+var version = "0.1.24"
 
 func main() {
 	// Subcommand routing: `agent-opsd version` short-circuits config load.
@@ -216,8 +217,19 @@ func buildDriver(cfg *config.Config) (driver.Driver, error) {
 			return nil, err
 		}
 		return d, nil
+	case "codex":
+		// Shells out to OpenAI's `codex` CLI binary; auth via OPENAI_API_KEY
+		// env (read by the CLI itself, not us). v1 is API-key only — OAuth /
+		// ~/.codex/auth.json distribution is a follow-up. No --max-turns cap
+		// available in the CLI; iteration limits are enforced by
+		// cfg.Agent.TaskTimeout (wall clock) only for v1.
+		d := &codex.Driver{Model: cfg.Agent.Model}
+		if err := d.Preflight(); err != nil {
+			return nil, err
+		}
+		return d, nil
 	default:
-		return nil, fmt.Errorf("unsupported provider %q (v0.1 ships claude + claude-cli)", cfg.Agent.Provider)
+		return nil, fmt.Errorf("unsupported provider %q (v0.1 ships claude + claude-cli + codex)", cfg.Agent.Provider)
 	}
 }
 

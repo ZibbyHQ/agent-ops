@@ -56,7 +56,17 @@ RUN apt-get update \
  && sed -i 's|http://deb.debian.org|https://deb.debian.org|g; s|http://security.debian.org|https://security.debian.org|g' \
         /etc/apt/sources.list.d/debian.sources \
  && npm install -g --no-audit --no-fund @anthropic-ai/claude-code \
+ && npm install -g --no-audit --no-fund @openai/codex@0.135.0 \
  && mkdir -p /var/lib/agent-ops /etc/agent-ops
+# ^ @openai/codex (the OpenAI Codex CLI) backs the `codex` provider in
+# agent-ops's buildDriver switch. Pinned to 0.135.0 — bump deliberately
+# when we want to pick up new CLI flags or NDJSON event shapes (the
+# driver's parser is forward-compatible, but new event types worth
+# surfacing in slog need explicit support). Codex CLI declares
+# `engines: node >= 16`, so the existing node:20-bookworm-slim base
+# satisfies it; no base-image bump required. Auth at runtime via the
+# OPENAI_API_KEY env var, which Codex reads natively — agent-ops does
+# not pass it on the command line.
 
 COPY --from=build /out/agent-opsd /usr/local/bin/agent-opsd
 
