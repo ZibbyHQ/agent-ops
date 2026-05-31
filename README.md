@@ -83,15 +83,28 @@ docker run -d \
 ## Choose a starting template
 
 `agent-ops` ships three bundled config templates so you don't have to
-write YAML by hand. Pick the one closest to your stack — every template
-includes liveness checks, housekeeping, and weekly security patching;
-they differ in the web stack they target and how they discover sites.
+write YAML by hand. Pick the one closest to your shape of host — every
+template includes liveness checks, housekeeping, and weekly security
+patching; they differ in how they expect the host to be laid out.
 
 | Template | Best for | Highlights |
 |---|---|---|
-| `single-app` | One WordPress + MySQL site on a budget VPS | Hourly liveness, nightly mysqldump, weekly `-security` updates |
-| `wordpress-multisite` | Apache + multiple WordPress installs on one host | 5-min per-site curl + auto-heal, daily cert renewal + WP integrity scan |
-| `nodejs-server` | Single Node.js app under PM2, nginx in front | PM2 health + crash-loop detection, `npm audit`, log rotation |
+| `single-app` | One web app on a host (any stack) | Hourly liveness, nightly backup audit, weekly security updates |
+| `wordpress-multisite` | One or more WordPress installs on one host | 15-min per-site curl + auto-heal, daily cert renewal + WP integrity scan |
+| `nodejs-server` | One or more Node.js apps on a host | App + reverse-proxy health, crash-loop detection, `npm audit`, log rotation |
+
+Each template ships an *intent* description rather than hardcoded service
+names. The agent runs a one-shot `discover_stack` task on first boot,
+figures out your specific stack (apache vs nginx vs caddy, mysql vs
+postgres, however many sites/apps, PM2 vs systemd, apt vs dnf, etc.),
+and caches what it found at `/var/lib/agent-ops/discovered-stack.json`.
+Every routine check then reads that state file instead of re-discovering.
+Re-discovery auto-fires if the file is missing or older than 7 days.
+
+You don't have to edit service names or paths to get going — the agent
+figures them out. If you want to constrain it ("only manage these 3
+sites, ignore the staging copies"), edit the `discover_stack` prompt in
+the template to say so.
 
 ```bash
 agent-ops init --list-templates                       # see them all
@@ -137,40 +150,42 @@ writable? MCP port free? upstream LLM reachable?)
 
 ---
 
-## Quickstart: WordPress + MySQL health monitoring
+## Quickstart: WordPress health monitoring
 
-A concrete scenario — agent-ops keeps a small WordPress install
-self-healing.
+A concrete scenario — agent-ops keeps a WordPress install self-healing.
 
-The full, copy-pasteable config for a real-world WordPress + Apache + MySQL
-host (multiple sites, 1 GB RAM, WooCommerce-friendly) lives at
+The full, copy-pasteable config for a real-world WordPress host
+(multiple sites or just one, agent figures it out) lives at
 [`examples/wordpress-multisite.yaml`](examples/wordpress-multisite.yaml).
 That example covers all of:
 
-- 5-minute liveness check on Apache + MySQL + per-site `curl`, auto-restart
-  on OOM
-- Hourly system housekeeping (memory, disk, runaway PHP-FPM workers,
-  abandoned MySQL connections, log rotation)
-- Daily 02:30 audit (mysqldump freshness, Let's Encrypt cert renewal,
-  WordPress file integrity — flags suspicious PHP under uploads)
-- Weekly security patches (ubuntu `-security` only, conservative)
-
-Copy it in place of `config.yaml`, edit the `SITES=` / `DBS=` lines for
-your domains, `agent-ops restart`. Done.
-
-Don't need the multi-site machinery? Use the stripped-down equivalent —
-[`examples/single-app.yaml`](./examples/single-app.yaml) — which covers
-the same three jobs (liveness, nightly mysqldump, weekly security
-patches) for a one-site WordPress + MySQL + Nginx host:
+- One-shot `discover_stack` on first boot — agent figures out which web
+  server (apache / nginx / caddy / …), which database (mysql / mariadb /
+  postgres), every WordPress install on the box, and writes
+  `/var/lib/agent-ops/discovered-stack.json`
+- 15-minute liveness check (web + db + per-site `curl`), auto-restart on
+  OOM, state-file-driven so the cron is cheap
+- Hourly system housekeeping (memory, disk, runaway workers, abandoned
+  DB connections, log rotation) — also state-aware
+- Daily 02:30 audit (backup freshness — discovers the backup tool itself
+  via `crontab -l`; Let's Encrypt or acme.sh cert renewal; WordPress
+  file integrity — flags suspicious PHP under uploads)
+- Weekly security patches (distro-aware: apt / dnf / yum / apk / zypper)
 
 ```bash
-sudo agent-ops init --template single-app --yes   # writes /etc/agent-ops/config.yaml
-sudo agent-ops start
+sudo agent-ops init --template wordpress-multisite --yes
+sudo agent-ops restart
+# discover_stack runs once before the first scheduled check fires.
+# Inspect what it found:  cat /var/lib/agent-ops/discovered-stack.json
 ```
 
-Now your WordPress will self-heal on minor failures, get backed up nightly,
-and security-patched weekly — and you'll get a notification via your
-configured webhook if anything goes wrong that the agent can't recover from.
+Don't run WordPress? `single-app` works for any single web app (Django,
+Ghost, static + reverse proxy, anything); `nodejs-server` is tuned for
+Node.js workloads under PM2 / systemd / docker.
+
+Now your host will self-heal on minor failures, get its backups audited
+nightly, and security-patched weekly — and you'll get a notification via
+your configured webhook on anything the agent can't recover from.
 
 ### Wiring the notify webhook
 

@@ -1,23 +1,39 @@
-# Example config — WordPress + MySQL + Apache, single host, multiple sites.
+# Example config — WordPress multi-site host, stack auto-discovered.
 #
-# Drop this in /etc/agent-ops/config.yaml (replace the default) when your
-# host runs the classic LAMP-ish stack:
+# Drop this in /etc/agent-ops/config.yaml when your host runs one or more
+# WordPress installs and you want agent-ops to figure out the rest. The
+# agent discovers your specific stack on first boot:
 #
-#   apache2 -> /var/www/<site>/ (one or more WordPress installs)
-#   mysql   -> one DB per site, all local
-#   certbot -> Let's Encrypt certs for each ServerName
+#   - which web server you run (apache2 / nginx / caddy / litespeed / …)
+#   - which database engine (mysql / mariadb / postgres / …)
+#   - every WordPress site on the box (by scanning for wp-config.php) and
+#     its public URL (from vhost configs + wp-config siteurl)
 #
-# Tuned for tight-memory droplets (1 GB RAM): cheap Haiku for routine
-# checks, Sonnet for upgrade reasoning. Cost ≈ $0.20–0.50 / day at this
-# cadence depending on incident volume.
+# What it finds gets cached at /var/lib/agent-ops/discovered-stack.json so
+# routine 5-minute liveness checks read state instead of re-discovering
+# every run. Re-discovery happens automatically if the file is missing or
+# older than 7 days.
+#
+# Cost expectations (USD, ANTHROPIC_API_KEY billing — claude-cli /
+# subscription billing varies):
+#   - discover_stack (Sonnet, runs once + every 7d):  ~$0.05–0.15 / run
+#   - liveness_check (Haiku, state-driven, */15 cadence): ~$0.01–0.03 / run
+#   - system_health  (Haiku, hourly):                  ~$0.02–0.05 / run
+#   - daily_audit    (Sonnet):                         ~$0.05–0.15 / run
+#   - weekly_security_patch (Sonnet):                  ~$0.10–0.30 / run
+# Typical total at this cadence: $3–8 / day. Drop liveness to */5 if you
+# need faster MTTR — adds another ~$2–3 / day.
 #
 # After copying:
-#   1. Edit the `SITES=...` line in the schedules below to list your domains.
-#   2. Edit the `DBS=...` line to list your MySQL databases.
-#   3. (Optional) Set AGENT_OPS_NOTIFY_WORKFLOW_ID env if you want Lark /
+#   1. `sudo agent-ops restart` — the agent will run discover_stack once
+#      and write /var/lib/agent-ops/discovered-stack.json before the first
+#      scheduled liveness_check fires.
+#   2. (Optional) Set AGENT_OPS_NOTIFY_WORKFLOW_ID env if you want Lark /
 #      Slack pings; without it, agent-ops still self-heals and logs but
 #      doesn't reach out.
-#   4. `sudo agent-ops restart`
+#   3. (Optional) If you want to constrain the agent ("only manage these 3
+#      sites, ignore staging") edit the discover_stack prompt below to say
+#      so — the discovery is yours to shape.
 
 state_dir: /var/lib/agent-ops
 
@@ -25,134 +41,314 @@ agent:
   provider: claude-cli
   model: claude-haiku-4-5-20251001    # cheap default — routine cron checks
   api_key_env: ANTHROPIC_API_KEY      # ignored when provider=claude-cli
-  max_tool_calls_per_task: 25
+  max_tool_calls_per_task: 40         # bumped for discovery — bounded below
   task_timeout: 15m
 
 mcp:
   listen_addr: "127.0.0.1:7842"
   token_env: AGENT_OPS_TOKEN
 
-# No first-run bootstrap — assumes WordPress + MySQL + Apache are
-# already installed and running. agent-ops is here to KEEP them alive,
-# not install them.
+# First-run discovery. Runs ONCE on initial daemon start (and on demand
+# via MCP `agent_run_now task_name=discover_stack`). Writes a structured
+# state file that every other schedule reads. Sonnet, because picking
+# apart vhost configs and tying ServerName to wp-config siteurl needs
+# real reasoning.
+bootstrap:
+  name: discover_stack
+  model: claude-sonnet-4-6
+  prompt: |
+    You are taking over a Linux host running one or more WordPress
+    sites. Your job is ONE-SHOT discovery: figure out the stack and
+    write a structured JSON file at
+    /var/lib/agent-ops/discovered-stack.json that every future
+    scheduled check will read.
+
+    Discover (via the shell tool — do NOT assume `apache2` / `nginx`
+    / `mysql` / specific paths exist):
+
+      1. Which web server is running? Try:
+           `systemctl list-units --type=service --state=running --no-pager`
+           and `ss -ltnp | grep -E ':(80|443) '`
+         Identify the unit name (apache2.service, nginx.service,
+         caddy.service, lighttpd.service, openlitespeed.service, …).
+         Capture both the friendly name and the systemd unit.
+
+      2. Which database engine? Try:
+           `systemctl list-units --type=service --state=running --no-pager \
+              | grep -iE 'mysql|mariadb|postgres'`
+         and `ss -ltnp | grep -E ':(3306|5432) '`
+         Identify the unit + a one-shot liveness command appropriate to
+         the engine (e.g. `mysqladmin ping`, `mariadb-admin ping`,
+         `pg_isready`).
+
+      3. Every WordPress install on the box. Scan likely docroots:
+           `find /var/www /srv /opt /home -maxdepth 4 -name wp-config.php \
+              -not -path '*/node_modules/*' 2>/dev/null`
+         For each wp-config.php found:
+           - docroot = parent directory
+           - site name = basename of docroot (or grep `DB_NAME` for a hint)
+           - public URL = grep `WP_HOME` / `WP_SITEURL` in wp-config.php;
+             if absent, cross-reference with the web server's vhost
+             config. For apache:  `apache2ctl -S 2>&1` (or
+             `httpd -S 2>&1`). For nginx: `nginx -T 2>&1 | grep -E
+             'server_name|root '`. Caddy: `caddy adapt --config
+             /etc/caddy/Caddyfile --pretty 2>/dev/null` or `cat
+             /etc/caddy/Caddyfile`. Match server_name → docroot.
+
+      4. Distro family (for the weekly patch task):
+           `. /etc/os-release && echo "$ID $ID_LIKE $VERSION_ID"`
+         Set "pkg_manager" to one of: apt, dnf, yum, apk, zypper.
+
+    Then write the file. Use `mkdir -p /var/lib/agent-ops` first. The
+    exact shape:
+
+      {
+        "web_server": "apache2",
+        "web_server_unit": "apache2.service",
+        "web_reload_cmd": "systemctl reload apache2",
+        "web_restart_cmd": "systemctl restart apache2",
+        "db_engine": "mysql",
+        "db_unit": "mysql.service",
+        "db_ping_cmd": "mysqladmin ping",
+        "sites": [
+          {
+            "name": "example.com",
+            "docroot": "/var/www/example",
+            "url": "https://example.com/"
+          }
+        ],
+        "distro": "ubuntu",
+        "pkg_manager": "apt",
+        "discovered_at": "2026-05-31T12:34:56Z"
+      }
+
+    Write it with `tee` so we capture the exact bytes in the log:
+      `cat > /var/lib/agent-ops/discovered-stack.json <<'JSON' …`
+
+    Hard constraints:
+      - Be thorough but BOUNDED. Don't `find /` — start from the
+        candidate docroots above. Don't follow symlinks beyond depth 4.
+      - If a site has no resolvable public URL, still list it with
+        "url": "" — liveness will skip the curl check for empty URLs.
+      - You are autonomous. Do NOT ask the operator anything; pick
+        sensible defaults and write the file. If something is genuinely
+        unknown, leave the field as "" — better empty than wrong.
+      - Show the final JSON file contents at the end of your run so it
+        appears in the daemon log.
+  verify_prompt: |
+    The previous agent claimed to write
+    /var/lib/agent-ops/discovered-stack.json. Independently verify:
+      1. File exists and is valid JSON.
+      2. `web_server`, `web_server_unit`, `db_engine`, `db_unit`,
+         `pkg_manager` are all non-empty.
+      3. The systemd unit named in `web_server_unit` exists
+         (`systemctl cat <unit> >/dev/null 2>&1`).
+      4. `sites` is an array; if non-empty, each entry has a non-empty
+         `docroot` that is a real directory.
+    Return STRICT JSON only (no prose):
+      {"pass": bool, "evidence": "<one-line>", "fail_reason": "<empty or one-line>"}
+  verify_model: claude-haiku-4-5-20251001
+  tools: [shell]
 
 schedules:
-  # ─── Every 5 minutes: web + DB liveness with auto-heal ──────────────
-  # Tight cadence because OOM-restarts on a 1 GB droplet need to recover
-  # fast, before WooCommerce loses orders. Haiku at 5-min cadence costs
-  # ~$0.10/day total. Worth it.
+  # ─── Every 15 minutes: web + DB + per-site liveness with auto-heal ──
+  # State-driven — reads /var/lib/agent-ops/discovered-stack.json so the
+  # check is cheap. If state is missing or > 7d old, re-runs discovery
+  # before checking.
   - name: liveness_check
-    cron: "*/5 * * * *"
+    cron: "*/15 * * * *"
     prompt: |
-      Verify the local LAMP stack is healthy. Use the shell tool only;
-      no human in the loop, do not ask clarifying questions — discover
-      via `ps`, `systemctl`, `curl`, `mysqladmin ping`.
+      Verify the host stack is healthy. Autonomous mode — no questions,
+      use the shell tool only.
 
-      Checks (in this order — short-circuit on first hard failure):
-        1. apache2 is running. If not: `systemctl restart apache2`,
-           verify, report. If restart fails, escalate (notify) and stop.
-        2. mysql is running and accepting connections
-           (`mysqladmin ping` returns "alive"). If down: restart mysql,
-           verify, report. If restart fails — DO NOT touch /etc/mysql or
-           data files — escalate and stop.
-        3. For each site listed below, `curl -sk -o /dev/null
-           -w "%{http_code}" -m 8 https://<site>/`. Anything not 2xx/3xx
-           for two consecutive runs (check state at /var/lib/agent-ops/
-           last-status.json — create if missing): try
-           `systemctl reload apache2`, re-check, report.
+      Step 0 — state file:
+        Read /var/lib/agent-ops/discovered-stack.json. If MISSING, or if
+        its mtime is older than 7 days
+        (`find /var/lib/agent-ops/discovered-stack.json -mtime +7
+        -print 2>/dev/null` returns the path), STOP this check and
+        instead run a quick re-discovery: figure out which web server,
+        which db, and which WordPress sites are present (see the
+        discover_stack task description in your config for the JSON
+        shape) and rewrite the file. Then continue.
 
-      SITES="lechaletsuisse.co.nz alzora.co.nz ursacorp.co.nz"
+      Step 1 — web server:
+        Use `web_server_unit` from the state file.
+        `systemctl is-active <unit>` should return "active". If not:
+        run `web_restart_cmd` once, re-check, report. If still down,
+        escalate (notify) and stop.
 
-      Report exactly one line per check: "<check>: <ok|fixed|failed>: <evidence>".
+      Step 2 — database:
+        Use `db_unit` from the state file.
+        `systemctl is-active <db_unit>` should return "active" AND
+        `db_ping_cmd` should report alive. If down: restart the unit
+        once. DO NOT touch /etc/<engine>/ or data files. If restart
+        fails, escalate and stop.
+
+      Step 3 — per-site:
+        For each site in the state file's `sites` array with a non-empty
+        `url`: `curl -sk -o /dev/null -w "%{http_code}" -m 8 <url>`.
+        Anything not 2xx/3xx for TWO consecutive runs (track at
+        /var/lib/agent-ops/last-status.json — create if missing, keyed
+        by site name): run `web_reload_cmd`, re-check, report.
+
+      Combine commands with `&&` / `;` where safe — aim for ONE shell
+      turn per step. Report exactly one line per check:
+        "<check>: <ok|fixed|failed>: <evidence>"
+
       Notification: if anything escalates, shell-out to your notify CLI
       (e.g. `zibby workflow trigger $AGENT_OPS_NOTIFY_WORKFLOW_ID
       --input severity=high --input msg="<one-line>"`). No CLI installed
       → just log; the operator will see it on `agent-ops logs`.
     tools: [shell]
 
-  # ─── Hourly: deeper system health (memory, disk, CPU, slow queries) ─
+  # ─── Hourly: deeper system health (memory, disk, runaway workers) ───
+  # Also state-driven. Housekeeping that's safe to do without per-stack
+  # specifics: free memory probe, disk, top CPU/memory consumers.
   - name: system_health
     cron: "0 * * * *"
     prompt: |
       Diagnose the host's vital signs and self-heal common housekeeping
-      issues. Autonomous mode — no questions.
+      issues. Autonomous mode — no questions, no follow-up clarifications.
+
+      Read /var/lib/agent-ops/discovered-stack.json first (it tells you
+      which unit names to act on). If state is missing or > 7d old,
+      re-discover the web_server + db_engine fields before continuing.
 
       Inspect (read-only first, then act):
-        - `free -m`. If MemAvailable < 80 MB AND mysql is the largest
-          process: `systemctl restart mysql` (free RAM through cache flush).
-        - `df -h /`. If / >= 90% used: rotate Apache logs
-          (`logrotate -f /etc/logrotate.d/apache2`), purge
-          /var/cache/apt/archives via `apt-get clean`. If still >= 85%,
-          enumerate the top 10 largest directories under /var/www/*/wp-content
-          (wp-content/uploads, wp-content/cache, wc-logs) and REPORT —
-          do not delete WordPress user data without escalation.
-        - `top -bn1 | head -20`. If a single PHP-FPM/apache2 worker is
-          > 80% CPU for the snapshot, capture its PID + cmdline and
-          `kill -TERM` it. Apache will respawn. Log what you killed.
-        - `mysqladmin processlist` filtered for "Sleep > 600": kill those
-          connections (`mysqladmin kill <id>`), they're abandoned PHP-FPM.
-        - `mysqladmin extended-status | grep -E "Threads_connected|max_used_connections"`.
-          If Threads_connected > 80% of max_connections, ALERT — don't
-          tune /etc/mysql/* automatically (data risk).
+        - `free -m`. If MemAvailable < 80 MB AND the db process (look up
+          via `ps aux | grep -E "$(jq -r .db_engine
+          /var/lib/agent-ops/discovered-stack.json)"`) is the largest
+          process: restart the db unit (`systemctl restart <db_unit>`)
+          to flush its in-memory cache and free RAM.
+        - `df -h /`. If / >= 90% used:
+            * rotate web server logs:
+              `logrotate -f /etc/logrotate.d/<web_server>` (file may not
+              exist — that's fine, skip).
+            * `apt-get clean` (if pkg_manager=apt) or `dnf clean all`
+              (dnf/yum) or `apk cache clean` (apk).
+            * If still >= 85%, enumerate the top 10 largest directories
+              under each site's docroot (look up from state file) and
+              REPORT — do not delete WordPress user data without
+              escalation.
+        - `top -bn1 | head -20`. If a single web-server worker or
+          PHP-FPM child is > 80% CPU for the snapshot, capture its PID +
+          cmdline and `kill -TERM` it. The web server will respawn. Log
+          what you killed.
+        - If db_engine is mysql/mariadb: `mysqladmin processlist 2>&1`
+          filtered for "Sleep > 600" → kill those connections
+          (`mysqladmin kill <id>`); they're abandoned PHP-FPM workers.
+          If db_engine is postgres: `psql -c "SELECT pid FROM
+          pg_stat_activity WHERE state='idle' AND state_change <
+          now() - interval '10 minutes'"` then `pg_terminate_backend()`
+          those. If db_engine is anything else, skip this check.
+        - Quick connection-pressure check: `mysqladmin
+          extended-status 2>/dev/null | grep -E "Threads_connected|
+          max_used_connections"` (mysql/mariadb) OR `psql -c "SELECT
+          count(*) FROM pg_stat_activity"` vs `SHOW max_connections;`
+          (postgres). If > 80% of max, ALERT — don't autotune.
 
       Report one line per check + any actions taken. Notify on any
       action OR any unresolved high-severity finding.
     tools: [shell]
 
   # ─── Daily 02:30: backup + cert + WP integrity ──────────────────────
+  # Sonnet for the audit reasoning; still state-driven.
   - name: daily_audit
     cron: "30 2 * * *"
-    model: claude-sonnet-4-6     # reasoning bump for verifier work
+    model: claude-sonnet-4-6
     prompt: |
       Daily audit. Autonomous, no questions.
 
-      Backup verification:
-        - List newest mysqldump under /var/backups/mysql/ (or wherever
-          configured — check /etc/cron.daily/ and /etc/crontab for the
-          backup job to learn the path).
-        - Fail if newest dump is older than 26 hours OR smaller than 1 MB.
-        - Spot-check: `gunzip -t <newest>.gz` succeeds (or `tar tzf`).
+      Read /var/lib/agent-ops/discovered-stack.json for site list +
+      web_server + db_engine. If state is missing or > 7d old, run
+      discovery first.
 
-      SSL cert renewal:
-        - `certbot certificates 2>&1` — for each cert with `VALID:
-          <days>` < 21, run `certbot renew --quiet --post-hook
-          "systemctl reload apache2"` and re-verify. Report which renewed.
+      Backup verification (discover the backup config — don't assume):
+        - `crontab -l 2>/dev/null; ls /etc/cron.d/ /etc/cron.daily/
+          /etc/cron.hourly/ 2>/dev/null | head -50` to find the backup
+          job. Grep for mysqldump / pg_dump / restic / borg / duplicity
+          / wp-cli backup commands. Note the output path.
+        - List newest dump under that path. Fail if older than 26 hours
+          OR smaller than 1 MB. Spot-check: `gunzip -t <newest>.gz`
+          succeeds, or `tar tzf` / `restic snapshots` / etc as
+          appropriate.
+        - If NO backup job is configured at all, report that as a
+          high-severity finding and notify.
 
-      WordPress core file integrity (lightweight):
-        - For each site under /var/www/<name>/, verify `wp-config.php`
-          mode is 640 or stricter and owner is `www-data` (or whatever
-          your install uses; `stat -c "%a %U" wp-config.php`).
-        - List any new files under wp-content/uploads/ with PHP extension
-          (`find /var/www/*/wp-content/uploads -name "*.php" -newer
-          /var/log/agent-ops/.last-php-scan 2>/dev/null`). PHP under
-          uploads = almost certainly a compromise. Notify + DO NOT delete.
+      SSL cert renewal (discover the tool — could be certbot, acme.sh,
+      lego, dehydrated, or none if behind a CDN):
+        - Try `command -v certbot acme.sh lego dehydrated 2>/dev/null`.
+        - If certbot: `certbot certificates 2>&1`. For each cert with
+          VALID DAYS < 21: `certbot renew --quiet --post-hook
+          "<web_reload_cmd>"` and re-verify.
+        - If acme.sh: `acme.sh --list` and `acme.sh --renew-all` for
+          near-expiry domains.
+        - If none found and the sites are on HTTPS: report "no cert
+          tool detected — verify renewals are external (CDN / load
+          balancer)" as info.
+
+      WordPress core file integrity (lightweight; iterate sites from
+      state file):
+        - For each site docroot: `stat -c "%a %U %G"
+          <docroot>/wp-config.php` — flag if mode is wider than 640 or
+          if owner doesn't match other PHP files in the docroot.
+        - `find <docroot>/wp-content/uploads -name "*.php" -newer
+          /var/log/agent-ops/.last-php-scan 2>/dev/null` — PHP under
+          uploads is almost always a compromise. Notify + DO NOT delete.
+          Touch the .last-php-scan marker after the scan.
 
       Report findings + actions. Notify on any failure or compromise.
     tools: [shell]
 
   # ─── Weekly Sunday 04:00: security updates ──────────────────────────
   # Conservative: ONLY security-marked updates, never full dist-upgrade.
-  # Reboot left to operator — kernel update flag triggers a notify, not
-  # an automatic reboot.
+  # Distro-aware via the state file's `pkg_manager` field.
   - name: weekly_security_patch
     cron: "0 4 * * 0"
     model: claude-sonnet-4-6
     prompt: |
-      Apply Ubuntu security updates ONLY. Autonomous, conservative.
+      Apply OS security updates ONLY. Autonomous, conservative.
 
-      Steps:
-        1. `apt-get update`.
-        2. `apt list --upgradable 2>/dev/null | grep -i "\-security"`.
-           If none: report "no security updates" and stop.
-        3. Snapshot package list to /var/log/agent-ops/pre-patch-$(date +%F).list.
-        4. `apt-get -y -o Dpkg::Options::="--force-confold" upgrade \
-              $(apt list --upgradable 2>/dev/null | grep -i "\-security" \
-              | awk -F/ '{print $1}')`.
-        5. Restart Apache + MySQL (`systemctl restart apache2 mysql`),
-           verify via the same liveness checks (`curl` + `mysqladmin ping`).
-           If anything broken: report stack trace + STOP, do NOT roll back
-           automatically — escalate to operator.
-        6. If `/var/run/reboot-required` exists: notify operator with
-           "reboot required for kernel update — schedule via `agent-ops
-           schedule run reboot`". Do NOT reboot automatically.
+      Read /var/lib/agent-ops/discovered-stack.json for `pkg_manager`,
+      `web_server_unit`, `db_unit`. If state is missing or > 7d old,
+      run discovery first.
+
+      Branch by pkg_manager:
+
+        apt (Debian / Ubuntu):
+          1. `apt-get update`
+          2. `apt list --upgradable 2>/dev/null | grep -i "\-security"`.
+             If none: report "no security updates" and stop.
+          3. Snapshot package list to
+             /var/log/agent-ops/pre-patch-$(date +%F).list
+             (`mkdir -p /var/log/agent-ops` first if needed).
+          4. `apt-get -y -o Dpkg::Options::="--force-confold" upgrade \
+               $(apt list --upgradable 2>/dev/null | grep -i "\-security" \
+                  | awk -F/ '{print $1}')`.
+
+        dnf / yum (RHEL / Rocky / Alma / Fedora):
+          1. `dnf updateinfo list security 2>/dev/null` (or `yum --security
+             check-update`). If empty: stop.
+          2. `dnf -y update --security` (or `yum -y --security update`).
+
+        apk (Alpine):
+          1. `apk version -l '<'` — list outdated.
+          2. `apk upgrade --no-cache` — Alpine doesn't separate security
+             so this is everything. Log that distinction in the report.
+
+        zypper (openSUSE / SLES):
+          1. `zypper patch-check -g security`. If clean: stop.
+          2. `zypper -n patch --category security`.
+
+      After the upgrade:
+        - Restart web + db (`systemctl restart <web_server_unit>
+          <db_unit>`).
+        - Re-run the liveness checks (curl each site URL + ping the db)
+          using the state file. If anything broken: report + STOP, do
+          NOT roll back automatically — escalate to operator.
+        - If `/var/run/reboot-required` exists (Debian/Ubuntu) OR
+          `needs-restarting -r` reports yes (RHEL family): notify
+          operator with "reboot required for kernel update — schedule
+          via `agent-ops schedule run reboot`". Do NOT reboot
+          automatically.
     tools: [shell]

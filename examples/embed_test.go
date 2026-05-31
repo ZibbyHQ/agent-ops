@@ -115,3 +115,79 @@ func TestNames_MatchesList(t *testing.T) {
 		}
 	}
 }
+
+// TestTemplates_AgentDrivenDiscoveryShape is the structural gate on the
+// agent-driven philosophy. Every shipped template MUST:
+//
+//  1. carry a `bootstrap:` block (so the agent discovers the host's stack
+//     on first run, rather than the YAML hardcoding service names), AND
+//  2. have its `bootstrap.name:` (the task the operator manually re-runs
+//     to refresh discovery) point at the discover_stack convention, AND
+//  3. mention the state file path in at least one schedule prompt — that
+//     proves the schedules read what discovery wrote (the whole point of
+//     the bootstrap-then-cache pattern), AND
+//  4. NOT hardcode well-known service names like `apache2`/`nginx`/
+//     `mysql` inside a schedule prompt as the unit-to-restart — those
+//     belong in discovered state, not in the prompt. (We allow them in
+//     comments and discovery prompts.)
+//
+// A future template author who drops discovery and goes back to writing
+// "systemctl restart apache2" verbatim in the prompt will trip this and
+// have to either add discovery or update the test with a justification.
+func TestTemplates_AgentDrivenDiscoveryShape(t *testing.T) {
+	const (
+		stateFile      = "/var/lib/agent-ops/discovered-stack.json"
+		discoveryTask  = "discover_stack"
+		bootstrapKey   = "bootstrap:"
+		schedulesKey   = "schedules:"
+	)
+	for _, name := range []string{"wordpress-multisite", "single-app", "nodejs-server"} {
+		body, err := Get(name)
+		if err != nil {
+			t.Fatalf("Get(%q): %v", name, err)
+		}
+		s := string(body)
+
+		// (1) bootstrap block present
+		if !strings.Contains(s, "\n"+bootstrapKey) && !strings.HasPrefix(s, bootstrapKey) {
+			t.Errorf("template %q: missing top-level `bootstrap:` block (agent-driven discovery is mandatory)", name)
+			continue
+		}
+		// (2) the bootstrap task is named discover_stack
+		if !strings.Contains(s, "name: "+discoveryTask) {
+			t.Errorf("template %q: bootstrap.name must be %q so operators have one well-known task to re-trigger discovery", name, discoveryTask)
+		}
+
+		// (3) at least one schedule prompt reads the state file
+		idx := strings.Index(s, "\n"+schedulesKey)
+		if idx < 0 {
+			t.Errorf("template %q: missing `schedules:` block", name)
+			continue
+		}
+		schedulesSection := s[idx:]
+		if !strings.Contains(schedulesSection, stateFile) {
+			t.Errorf("template %q: no schedule prompt references %s — schedules must read discovered state, not re-discover every run", name, stateFile)
+		}
+
+		// (4) no hardcoded restart of well-known service names inside a
+		// schedule prompt. We grep the schedules section for the
+		// telltale pattern `systemctl restart <hardcoded-name>` (or
+		// `systemctl reload`) for the legacy hardcoded names. The
+		// agent-driven templates should use placeholders read from
+		// state (e.g. `<web_restart_cmd>`).
+		forbidden := []string{
+			"systemctl restart apache2",
+			"systemctl reload apache2",
+			"systemctl restart nginx",
+			"systemctl reload nginx",
+			"systemctl restart mysql",
+			"systemctl restart mariadb",
+			"pm2 restart my-node-app",
+		}
+		for _, f := range forbidden {
+			if strings.Contains(schedulesSection, f) {
+				t.Errorf("template %q: schedule prompt contains hardcoded %q — should reference a state-file field (e.g. <web_restart_cmd>) instead", name, f)
+			}
+		}
+	}
+}

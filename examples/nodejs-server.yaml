@@ -1,26 +1,32 @@
-# Example config — Node.js server behind nginx, PM2-managed.
+# Example config — Node.js application host, stack auto-discovered.
 #
-# Drop this in /etc/agent-ops/config.yaml when your host runs a single
-# Node.js application (Express / Fastify / Next.js / NestJS) under PM2,
-# fronted by nginx as a reverse proxy with Let's Encrypt TLS:
+# Drop this in /etc/agent-ops/config.yaml when your host runs one or more
+# Node.js applications. The agent discovers your specific setup on first
+# boot rather than assuming PM2 / nginx / a particular port:
 #
-#   nginx   -> reverse-proxies :443 to the Node process on :3000
-#   pm2     -> keeps `node server.js` alive, captures logs to ~pm2/.pm2/logs/
-#   certbot -> Let's Encrypt cert for the ServerName
+#   - the Node process(es) running on the box and how they're managed
+#     (PM2 / systemd / docker / forever / bare nohup)
+#   - the reverse proxy (nginx / apache / caddy / none — direct-bound)
+#   - the public URL + the upstream port the Node app listens on
+#   - the app's working directory (so npm audit can run against it)
 #
-# Tuned for small droplets (1-2 GB RAM): cheap Haiku for routine checks,
-# Sonnet for the weekly security patch where reasoning matters. Cost
-# ≈ $0.15-0.30 / day at this cadence depending on restart frequency.
+# State cached at /var/lib/agent-ops/discovered-stack.json. Re-discovery
+# auto-fires if file is missing or > 7 days old.
 #
-# Assumes you've ALREADY installed Node + PM2 + nginx and the app is
-# running. agent-ops keeps it alive — it doesn't bootstrap the stack.
+# Cost expectations (USD, ANTHROPIC_API_KEY billing):
+#   - discover_stack (Sonnet, once + every 7d):   ~$0.05–0.15 / run
+#   - liveness_check (Haiku, state-driven, */15): ~$0.01–0.03 / run
+#   - system_health  (Haiku, hourly):             ~$0.02–0.05 / run
+#   - daily_audit    (Sonnet):                    ~$0.05–0.15 / run
+#   - weekly_security_patch (Sonnet):             ~$0.10–0.30 / run
+# Typical total at this cadence: ~$3–6 / day.
 #
 # After copying:
-#   1. Edit the `APP_NAME=` and `APP_URL=` lines in the schedules below.
-#   2. Confirm `pm2 list` shows your app under the same user the daemon
-#      runs as (or set `sudo -u <appuser> pm2 ...` in the prompts).
-#   3. (Optional) Set AGENT_OPS_NOTIFY_WORKFLOW_ID for Lark / Slack pings.
-#   4. `sudo agent-ops restart`
+#   1. `sudo agent-ops restart` — discover_stack runs once before the
+#      first liveness_check.
+#   2. (Optional) Set AGENT_OPS_NOTIFY_WORKFLOW_ID for Lark / Slack pings.
+#   3. (Optional) If you want to constrain it ("only manage the app named
+#      api, ignore staging") edit the discover_stack prompt below.
 
 state_dir: /var/lib/agent-ops
 
@@ -28,148 +34,288 @@ agent:
   provider: claude-cli
   model: claude-haiku-4-5-20251001    # cheap default — routine cron checks
   api_key_env: ANTHROPIC_API_KEY      # ignored when provider=claude-cli
-  max_tool_calls_per_task: 25
+  max_tool_calls_per_task: 40         # bumped for discovery — bounded below
   task_timeout: 15m
 
 mcp:
   listen_addr: "127.0.0.1:7842"
   token_env: AGENT_OPS_TOKEN
 
-# No first-run bootstrap — assumes Node + PM2 + nginx are already
-# installed and running. agent-ops is here to KEEP the app alive.
+# First-run discovery. Runs ONCE on initial daemon start (re-invokable via
+# MCP `agent_run_now task_name=discover_stack`). Writes the state file
+# every other schedule reads.
+bootstrap:
+  name: discover_stack
+  model: claude-sonnet-4-6
+  prompt: |
+    You are taking over a Linux host running one or more Node.js
+    applications. Your job is ONE-SHOT discovery: figure out what's
+    here and write structured JSON to
+    /var/lib/agent-ops/discovered-stack.json. Every future scheduled
+    check reads it.
+
+    Discover (via the shell tool — do NOT assume PM2 / nginx / a
+    particular APP_NAME / port):
+
+      1. How is the Node app managed? Check in this order:
+           a. PM2: `command -v pm2 && pm2 jlist 2>/dev/null` — if it
+              returns a non-empty JSON array, the process_manager is
+              "pm2". Capture each app's name + pm2_env.pm_exec_path +
+              pm2_env.exec_interpreter.
+           b. systemd: `systemctl list-units --type=service --state=running
+              --no-pager | grep -iE 'node|npm|nest|next|express'` — look
+              for units running node. Also `systemctl list-units
+              | grep -E '\.service.*node'`.
+           c. docker: `docker ps --format '{{.Names}} {{.Image}} {{.Ports}}'
+              2>/dev/null | grep -iE 'node|api|web'` — if any.
+           d. bare process: `ps -eo pid,user,cmd | grep -E
+              '^\s*[0-9]+ [^ ]+ /[^ ]*node ' | grep -v grep`.
+
+      2. Which port(s) does the Node app(s) listen on?
+           `ss -ltnp | grep -E 'node|nodejs'`
+         For each found, note the port. Cross-reference with the
+         process-manager info from step 1 to associate port → app name.
+
+      3. Reverse proxy? `ss -ltnp | grep -E ':(80|443) '`. If
+         nginx/apache/caddy/traefik is on :80/:443, identify the unit.
+         Parse its config to confirm it proxies to the Node port(s).
+         If nothing on :80/:443 OR the Node app itself is bound there,
+         there's no reverse proxy.
+
+      4. App working directory(ies): for each PM2 app, pm2_env.pm_cwd.
+         For systemd units, `systemctl show -p WorkingDirectory <unit>`.
+         For docker, `docker inspect <name> --format '{{.Config.WorkingDir}}'`.
+         Bare: derive from /proc/<pid>/cwd. The CWD is what `npm audit`
+         needs to run against.
+
+      5. Public URL: parse the reverse proxy config for
+         server_name / ServerName. If no proxy and the Node app is
+         direct-bound, use `http://<hostname>:<app_port>/` (or the
+         first TLS-terminated origin you find).
+
+      6. Distro:
+           `. /etc/os-release && echo "$ID $ID_LIKE"`
+         Set pkg_manager to: apt, dnf, yum, apk, zypper.
+
+    Then write the file. `mkdir -p /var/lib/agent-ops` first. Shape:
+
+      {
+        "process_manager": "pm2",
+        "apps": [
+          {
+            "name": "api",
+            "port": 3000,
+            "cwd": "/var/www/api",
+            "restart_cmd": "pm2 restart api",
+            "reload_cmd": "pm2 reload api",
+            "status_cmd": "pm2 jlist | jq -r '.[] | select(.name==\"api\") | .pm2_env.status'",
+            "logs_cmd": "pm2 logs api --lines 200 --nostream"
+          }
+        ],
+        "web_server": "nginx",
+        "web_server_unit": "nginx.service",
+        "web_reload_cmd": "systemctl reload nginx",
+        "web_restart_cmd": "systemctl restart nginx",
+        "site_url": "https://example.com/healthz",
+        "distro": "ubuntu",
+        "pkg_manager": "apt",
+        "discovered_at": "2026-05-31T12:34:56Z"
+      }
+
+    Adapt the `restart_cmd` / `reload_cmd` / `status_cmd` / `logs_cmd`
+    to the process_manager you discovered:
+      - pm2:     `pm2 restart <name>` / `pm2 reload <name>` /
+                 `pm2 jlist | jq …` / `pm2 logs <name>`
+      - systemd: `systemctl restart <unit>` / `systemctl reload <unit>` /
+                 `systemctl is-active <unit>` / `journalctl -u <unit> -n 200`
+      - docker:  `docker restart <name>` / `docker restart <name>` /
+                 `docker inspect -f '{{.State.Status}}' <name>` /
+                 `docker logs --tail 200 <name>`
+      - bare:    leave restart_cmd "" (operator-only), status_cmd
+                 `pgrep -f '<cmd-pattern>'`.
+
+    Write with `cat > /var/lib/agent-ops/discovered-stack.json <<'JSON' …`
+    so the JSON appears in the log. Echo the file at the end.
+
+    Hard constraints:
+      - Be thorough but BOUNDED. Don't `find /`. Don't follow symlinks
+        beyond depth 4.
+      - Autonomous — pick sensible defaults. Empty fields beat wrong
+        ones.
+      - If `web_server` ends up empty (no reverse proxy), liveness
+        will still curl the site_url directly.
+  verify_prompt: |
+    The previous agent claimed to write
+    /var/lib/agent-ops/discovered-stack.json. Independently verify:
+      1. File exists and is valid JSON.
+      2. `process_manager` and `pkg_manager` are non-empty.
+      3. `apps` is a non-empty array; each entry has non-empty `name`
+         and `port`.
+      4. At least one app's `status_cmd` is non-empty.
+    Return STRICT JSON only:
+      {"pass": bool, "evidence": "<one-line>", "fail_reason": "<empty or one-line>"}
+  verify_model: claude-haiku-4-5-20251001
+  tools: [shell]
 
 schedules:
-  # ─── Every 5 minutes: app + reverse-proxy liveness with auto-heal ───
-  # Tight cadence so a crashed Node worker doesn't drop traffic for long.
-  # PM2 already auto-restarts on crash; this checks PM2 ITSELF is healthy
-  # AND that nginx is reaching the upstream.
+  # ─── Every 15 minutes: app + reverse-proxy liveness with auto-heal ──
   - name: liveness_check
-    cron: "*/5 * * * *"
+    cron: "*/15 * * * *"
     prompt: |
-      Verify the Node.js app stack is healthy. Use the shell tool only;
-      no human in the loop, autonomous mode — discover via `pm2 list`,
-      `systemctl`, `curl`.
+      Verify the Node.js stack is healthy. Autonomous mode — no
+      questions, shell tool only.
 
-      APP_NAME="my-node-app"
-      APP_URL="https://example.com/healthz"
-      UPSTREAM_PORT=3000
+      Step 0 — state:
+        Read /var/lib/agent-ops/discovered-stack.json. If missing or
+        mtime > 7d old, re-discover (process_manager, apps[*],
+        web_server, site_url) and rewrite the file before continuing.
 
-      Checks (in this order — short-circuit on first hard failure):
-        1. `pm2 jlist | jq -r '.[] | select(.name=="'"$APP_NAME"'") |
-           .pm2_env.status'` returns "online". If "stopped" / "errored":
-           `pm2 restart $APP_NAME`, wait 5 seconds, re-check. If still
-           not "online", escalate (notify) and stop.
-        2. nginx is running. If not: `systemctl restart nginx`, verify,
-           report. If restart fails, escalate and stop.
-        3. `curl -sk -o /dev/null -w "%{http_code}" -m 8 $APP_URL`.
-           Anything not 2xx/3xx for two consecutive runs (check state at
-           /var/lib/agent-ops/last-status.json — create if missing): try
-           `pm2 reload $APP_NAME` (zero-downtime), re-check, report.
-        4. `ss -ltn | grep ":$UPSTREAM_PORT "` — confirms Node is
-           actually listening. If absent: `pm2 restart $APP_NAME`,
-           verify, report.
+      Step 1 — per app, in order:
+        For each entry in `apps`:
+          a. Run its `status_cmd`. Expect "online" (pm2) or "active"
+             (systemd) or "running" (docker). If not: run `restart_cmd`
+             once, wait 5s, re-check. If still not healthy, escalate
+             (notify with the app's `logs_cmd` tail) and stop.
+          b. `ss -ltn | grep ":<app.port> "` — confirm the port is
+             actually listening. If absent after a successful status
+             check, run `restart_cmd`, re-check.
 
-      Report exactly one line per check: "<check>: <ok|fixed|failed>: <evidence>".
-      Notification: if anything escalates, shell-out to your notify CLI
-      (e.g. `zibby workflow trigger $AGENT_OPS_NOTIFY_WORKFLOW_ID
-      --input severity=high --input msg="<one-line>"`). No CLI installed
-      → just log; the operator will see it on `agent-ops logs`.
+      Step 2 — reverse proxy (only if `web_server_unit` is non-empty):
+        `systemctl is-active <web_server_unit>` should be "active". If
+        not: `web_restart_cmd`, re-check.
+
+      Step 3 — end-to-end: `curl -sk -o /dev/null -w "%{http_code}" -m
+        8 <site_url>`. Anything not 2xx/3xx for two consecutive runs
+        (track at /var/lib/agent-ops/last-status.json — create if
+        missing): run `web_reload_cmd` (if web_server present) OR the
+        first app's `reload_cmd`, re-check, report.
+
+      Combine commands with `&&` / `;` — aim for ONE shell turn per
+      step. Report one line per check: "<check>: <ok|fixed|failed>:
+      <evidence>".
+
+      Notify on escalation: shell-out to `zibby workflow trigger
+      $AGENT_OPS_NOTIFY_WORKFLOW_ID --input severity=high --input
+      msg="…"`. If no CLI, log only.
     tools: [shell]
 
-  # ─── Hourly: deeper system health (memory, disk, PM2 restart loops) ──
+  # ─── Hourly: deeper system health (memory, disk, crash-loops) ────────
   - name: system_health
     cron: "0 * * * *"
     prompt: |
-      Diagnose the host's vital signs and self-heal common housekeeping
-      issues. Autonomous mode — no questions.
+      Diagnose host vitals + self-heal common housekeeping issues.
+      Autonomous, no questions.
 
-      APP_NAME="my-node-app"
+      Read /var/lib/agent-ops/discovered-stack.json. If missing or > 7d
+      old, re-discover first.
 
       Inspect (read-only first, then act):
-        - `free -m`. If MemAvailable < 100 MB AND `$APP_NAME`'s
-          PM2-reported memory is the largest non-system process:
-          `pm2 reload $APP_NAME` (graceful, no downtime). Re-check.
-        - `df -h /`. If / >= 90% used: rotate PM2 logs
-          (`pm2 flush $APP_NAME`), rotate nginx logs
-          (`logrotate -f /etc/logrotate.d/nginx`), purge
-          /var/cache/apt/archives via `apt-get clean`. If still >= 85%,
-          enumerate the top 10 largest directories under /home,
-          /var/log/, ~pm2/.pm2/logs/ and REPORT — do not delete user
-          data without escalation.
-        - `pm2 jlist | jq -r '.[] | select(.name=="'"$APP_NAME"'") |
-          .pm2_env.restart_time'`. If restart_time grew by > 5 since
-          the last hour (track in /var/lib/agent-ops/restart-counter.json,
-          create if missing), the app is in a crash loop. Capture the
-          last 200 lines of `pm2 logs $APP_NAME --lines 200 --nostream`
-          and notify — do NOT keep restarting; the operator needs to
-          look at the trace.
+        - `free -m`. If MemAvailable < 100 MB AND a single Node worker
+          dominates RSS (`ps -eo pid,rss,cmd --sort=-rss | grep node
+          | head -3`): run that app's `reload_cmd` (graceful — pm2
+          reload / systemctl restart). Re-check.
+        - `df -h /`. If / >= 90% used:
+            * If process_manager=pm2: `pm2 flush` (each app's logs).
+            * Rotate web server logs (web_server_unit from state):
+              `logrotate -f /etc/logrotate.d/<web_server>` if present.
+            * Distro-aware cache clean: `apt-get clean` (apt) /
+              `dnf clean all` (dnf/yum) / `apk cache clean` (apk).
+            * If still >= 85%, enumerate top 10 largest dirs under
+              /home, /var/log/, /var/lib/docker (if docker), and each
+              app's `cwd` — REPORT only, do not delete.
+        - Crash-loop check: for each app, parse `status_cmd` output OR
+          (pm2 only) `pm2 jlist | jq -r '.[] | select(.name==
+          "<name>") | .pm2_env.restart_time'`. Track in
+          /var/lib/agent-ops/restart-counter.json (keyed by app name).
+          If the count grew by > 5 since the last hourly run: the app
+          is in a crash loop. Capture last 200 lines from the app's
+          `logs_cmd` and NOTIFY — do NOT keep restarting; the operator
+          needs to see the trace.
         - `top -bn1 | head -20`. If a single node worker is > 80% CPU
-          for the snapshot AND CPU stays high after 30 seconds (sample
-          twice), capture its PID + heap snapshot path hint and notify.
-          Don't kill — could be legitimate batch work.
+          for the snapshot AND remains so after 30s (sample twice),
+          capture PID + cmdline and NOTIFY. Don't kill — could be
+          legitimate batch work.
 
-      Report one line per check + any actions taken. Notify on any
-      action OR any unresolved high-severity finding.
+      Report one line per check + any actions. Notify on any action OR
+      unresolved high-severity finding.
     tools: [shell]
 
   # ─── Daily 02:30: dependency audit + cert + log housekeeping ────────
   - name: daily_audit
     cron: "30 2 * * *"
-    model: claude-sonnet-4-6     # reasoning bump for audit work
+    model: claude-sonnet-4-6
     prompt: |
       Daily audit. Autonomous, no questions.
 
-      APP_DIR="/var/www/my-node-app"
+      Read /var/lib/agent-ops/discovered-stack.json for apps[*].cwd
+      and web reload command. If missing / > 7d old, re-discover.
 
       Dependency audit (read-only):
-        - `cd $APP_DIR && npm audit --json --omit=dev 2>/dev/null`.
-          Parse the JSON; if there are advisories of severity
-          "high" or "critical", report them with package name,
-          severity, and the fix recommendation. Do NOT run
-          `npm audit fix` — dependency upgrades are an operator
-          decision, not a cron one.
+        For each app's `cwd`:
+          - `cd <cwd> && npm audit --json --omit=dev 2>/dev/null` (or
+            `pnpm audit --json` / `yarn npm audit --json` — try each).
+          - Parse JSON; report advisories of severity "high" or
+            "critical" with package name, severity, and fix
+            recommendation. Do NOT run `npm audit fix` — dependency
+            upgrades are an operator decision.
 
-      SSL cert renewal:
-        - `certbot certificates 2>&1` — for each cert with `VALID:
-          <days>` < 21, run `certbot renew --quiet --post-hook
-          "systemctl reload nginx"` and re-verify. Report which renewed.
+      SSL cert renewal (discover the tool — don't assume certbot):
+        - `command -v certbot acme.sh lego dehydrated 2>/dev/null`.
+        - If certbot: `certbot certificates 2>&1`. For each cert with
+          VALID DAYS < 21: `certbot renew --quiet --post-hook
+          "<web_reload_cmd>"` and re-verify.
+        - acme.sh: `acme.sh --list` + `acme.sh --renew-all` for near-
+          expiry.
+        - None found + sites on HTTPS: report "no cert tool detected —
+          renewals are external (CDN / LB)" as info.
 
-      PM2 log + dump housekeeping:
-        - `pm2 jlist | jq -r '.[] | .pm2_env.pm_out_log_path'` —
-          if any log file is > 500 MB, `pm2 flush <name>` it.
-        - Check `~pm2/.pm2/dump.pm2` exists (so PM2 will restore the
-          app on reboot). If missing: `pm2 save` to write it.
+      Log + state housekeeping:
+        - process_manager=pm2: `pm2 jlist | jq -r '.[] |
+          .pm2_env.pm_out_log_path'` — `pm2 flush <name>` any log
+          > 500 MB. Also confirm `~pm2/.pm2/dump.pm2` exists — if not,
+          `pm2 save`.
+        - process_manager=systemd: `journalctl --disk-usage` — if
+          > 1 GB, `journalctl --vacuum-time=14d`.
+        - process_manager=docker: `docker system df` — if Reclaimable
+          > 2 GB, `docker system prune -f` (no -a — keeps images in use).
 
       Report findings + actions. Notify on any high/critical advisory
-      OR any failure.
+      OR failure.
     tools: [shell]
 
-  # ─── Weekly Sunday 04:00: security updates ──────────────────────────
-  # Conservative: ONLY security-marked updates, never full dist-upgrade,
-  # never `npm update` (semver breakage risk). Reboot is operator-only.
+  # ─── Weekly Sunday 04:00: OS security updates ───────────────────────
   - name: weekly_security_patch
     cron: "0 4 * * 0"
     model: claude-sonnet-4-6
     prompt: |
-      Apply Ubuntu/Debian security updates ONLY. Autonomous, conservative.
-      Do NOT touch npm dependencies — those are an explicit operator call.
+      Apply OS security updates ONLY. Autonomous, conservative.
+      Do NOT touch npm dependencies — those are an explicit operator
+      call.
 
-      APP_NAME="my-node-app"
+      Read /var/lib/agent-ops/discovered-stack.json for `pkg_manager`,
+      `web_server_unit`, apps[*]. If missing / > 7d old, re-discover.
 
-      Steps:
-        1. `apt-get update`.
-        2. `apt list --upgradable 2>/dev/null | grep -i "\-security"`.
-           If none: report "no security updates" and stop.
-        3. Snapshot package list to
-           /var/log/agent-ops/pre-patch-$(date +%F).list.
-        4. `apt-get -y -o Dpkg::Options::="--force-confold" upgrade \
-              $(apt list --upgradable 2>/dev/null | grep -i "\-security" \
-              | awk -F/ '{print $1}')`.
-        5. `systemctl reload nginx` and `pm2 reload $APP_NAME`
-           (graceful). Re-run the liveness checks (curl + pm2 status).
-           If anything broke: report stack trace + STOP, do NOT roll
-           back automatically — escalate to operator.
-        6. If `/var/run/reboot-required` exists: notify operator with
-           "reboot required for kernel update — schedule via `agent-ops
-           schedule run reboot`". Do NOT reboot automatically.
+      Branch by pkg_manager:
+        apt:    `apt-get update && apt list --upgradable 2>/dev/null
+                | grep -i '\-security'` → upgrade just those with
+                `apt-get -y -o Dpkg::Options::="--force-confold"
+                upgrade <pkgs>`.
+        dnf:    `dnf -y update --security`
+        yum:    `yum -y --security update`
+        apk:    `apk upgrade --no-cache`  (Alpine doesn't separate)
+        zypper: `zypper -n patch --category security`
+
+      Snapshot package list to /var/log/agent-ops/pre-patch-$(date +%F).list
+      first (mkdir -p if needed).
+
+      After upgrade:
+        - `web_reload_cmd` (if web_server present).
+        - For each app, run its `reload_cmd` (graceful) — pm2 reload /
+          systemctl restart / docker restart as appropriate.
+        - Re-run liveness: status_cmd + curl <site_url>. If anything
+          broken: report stack trace + STOP, escalate. Do NOT roll back
+          automatically.
+        - If `/var/run/reboot-required` exists (Debian/Ubuntu) OR
+          `needs-restarting -r` (RHEL family) says yes: notify operator.
+          Do NOT reboot automatically.
     tools: [shell]
