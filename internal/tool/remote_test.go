@@ -42,6 +42,54 @@ func TestRemoteToolAdapter_NameSchema(t *testing.T) {
 	}
 }
 
+// TestRemoteToolAdapter_NoDoublePrefix — the Zibby Remote MCP advertises
+// every tool already namespaced (`zibby_list_workflows`); registering
+// under client name `zibby` must NOT produce `zibby_zibby_list_workflows`.
+// Single-prefix is the canonical form.
+func TestRemoteToolAdapter_NoDoublePrefix(t *testing.T) {
+	cases := []struct {
+		clientName string
+		remoteName string
+		wantName   string
+		desc       string
+	}{
+		{"zibby", "zibby_list_workflows", "zibby_list_workflows",
+			"remote name already prefixed → single prefix"},
+		{"zibby", "zibby_create_pat", "zibby_create_pat",
+			"remote name already prefixed → single prefix"},
+		{"zibby", "zibby_list_marketplace_trending", "zibby_list_marketplace_trending",
+			"deeply suffixed remote name still collapses"},
+		{"zibby", "trigger_workflow", "zibby_trigger_workflow",
+			"un-prefixed remote name → join with underscore"},
+		{"gh", "lint_repo", "gh_lint_repo",
+			"different client+remote → normal join"},
+		{"zibby", "zibby", "zibby_zibby",
+			"exact-equal name (no trailing underscore in remote) → still joined"},
+		{"zibby", "zibbylike_tool", "zibby_zibbylike_tool",
+			"prefix-without-underscore is NOT a match → normal join"},
+		{"", "anything", "_anything",
+			"empty clientName: empty-string + '_' + remote (existing behavior, unchanged)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.desc, func(t *testing.T) {
+			a := NewRemoteToolAdapter(tc.clientName, tc.remoteName, "", nil, &fakeInvoker{})
+			if a.Name() != tc.wantName {
+				t.Errorf("client=%q remote=%q: Name = %q, want %q",
+					tc.clientName, tc.remoteName, a.Name(), tc.wantName)
+			}
+			// RemoteToolName / RemoteClientName must still report the
+			// pre-join components — Invoke() forwards remoteName to the
+			// MCP server, and the server expects its own original name.
+			if a.RemoteClientName() != tc.clientName {
+				t.Errorf("RemoteClientName = %q, want %q", a.RemoteClientName(), tc.clientName)
+			}
+			if a.RemoteToolName() != tc.remoteName {
+				t.Errorf("RemoteToolName = %q, want %q", a.RemoteToolName(), tc.remoteName)
+			}
+		})
+	}
+}
+
 // TestRemoteToolAdapter_EmptySchema_FallsBackToObject — empty/missing
 // inputSchema must still produce a valid JSON-schema so the local LLM
 // driver doesn't choke on the registered tool.

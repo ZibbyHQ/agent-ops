@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // RemoteInvoker is the minimal subset of mcpclient.Client that
@@ -28,11 +29,22 @@ type RemoteCallResult struct {
 // RemoteToolAdapter wraps one remote MCP tool as a local Tool. The
 // daemon's local LLM driver sees it the same as any built-in Tool.
 //
-// Naming convention: the local name is `{clientName}_{remoteToolName}`.
-// E.g. an MCP client named `zibby` advertising `trigger_workflow`
-// surfaces as `zibby_trigger_workflow` in the registry. This matches the
-// notify-clause hint in the bundled templates ("look for names ending in
-// `_trigger_workflow`, `_post_message`, …").
+// Naming convention: the local name is `{clientName}_{remoteToolName}`,
+// EXCEPT when the remote tool already starts with `{clientName}_` —
+// in which case the local name is just `{remoteToolName}` (no double
+// prefix). The Zibby Remote MCP server, for instance, advertises every
+// tool with a `zibby_` prefix already (`zibby_list_workflows`,
+// `zibby_create_pat`, …); registering it under client name `zibby`
+// would otherwise produce `zibby_zibby_list_workflows` etc, which both
+// uglies up the daemon log and breaks the notify-clause hints in the
+// bundled templates ("look for names ending in `_trigger_workflow`,
+// `_post_message`, …" — the hint matches on the canonical single-prefix
+// form).
+//
+// For remote tools whose names DON'T share the client prefix
+// (e.g. a custom MCP exposing `lint_repo` under client `gh`), the
+// prefix is still prepended to disambiguate against builtin tool names
+// and tools from other integrations.
 //
 // Conflict policy: registry.Register errors on duplicates. The daemon
 // boot path translates that into a Warn log + last-wins (later integration
@@ -64,6 +76,20 @@ func NewRemoteToolAdapter(clientName, remoteName, description string, schema jso
 }
 
 func (a *RemoteToolAdapter) Name() string {
+	// Avoid double-prefix: when the remote tool name already starts
+	// with `<clientName>_`, the prefix is part of the canonical tool
+	// identity — e.g. the Zibby Remote MCP advertises tools as
+	// `zibby_list_workflows`, and registering them under client name
+	// `zibby` should keep the single prefix, not produce
+	// `zibby_zibby_list_workflows`.
+	//
+	// Exact-equality and prefix-only-the-clientName don't get a free
+	// underscore — those don't share the `<clientName>_` shape so the
+	// normal join applies.
+	prefix := a.clientName + "_"
+	if a.clientName != "" && strings.HasPrefix(a.remoteName, prefix) {
+		return a.remoteName
+	}
 	return a.clientName + "_" + a.remoteName
 }
 
