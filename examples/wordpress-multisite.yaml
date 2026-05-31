@@ -1,0 +1,158 @@
+# Example config — WordPress + MySQL + Apache, single host, multiple sites.
+#
+# Drop this in /etc/agent-ops/config.yaml (replace the default) when your
+# host runs the classic LAMP-ish stack:
+#
+#   apache2 -> /var/www/<site>/ (one or more WordPress installs)
+#   mysql   -> one DB per site, all local
+#   certbot -> Let's Encrypt certs for each ServerName
+#
+# Tuned for tight-memory droplets (1 GB RAM): cheap Haiku for routine
+# checks, Sonnet for upgrade reasoning. Cost ≈ $0.20–0.50 / day at this
+# cadence depending on incident volume.
+#
+# After copying:
+#   1. Edit the `SITES=...` line in the schedules below to list your domains.
+#   2. Edit the `DBS=...` line to list your MySQL databases.
+#   3. (Optional) Set AGENT_OPS_NOTIFY_WORKFLOW_ID env if you want Lark /
+#      Slack pings; without it, agent-ops still self-heals and logs but
+#      doesn't reach out.
+#   4. `sudo agent-ops restart`
+
+state_dir: /var/lib/agent-ops
+
+agent:
+  provider: claude-cli
+  model: claude-haiku-4-5-20251001    # cheap default — routine cron checks
+  api_key_env: ANTHROPIC_API_KEY      # ignored when provider=claude-cli
+  max_tool_calls_per_task: 25
+  task_timeout: 15m
+
+mcp:
+  listen_addr: "127.0.0.1:7842"
+  token_env: AGENT_OPS_TOKEN
+
+# No first-run bootstrap — assumes WordPress + MySQL + Apache are
+# already installed and running. agent-ops is here to KEEP them alive,
+# not install them.
+
+schedules:
+  # ─── Every 5 minutes: web + DB liveness with auto-heal ──────────────
+  # Tight cadence because OOM-restarts on a 1 GB droplet need to recover
+  # fast, before WooCommerce loses orders. Haiku at 5-min cadence costs
+  # ~$0.10/day total. Worth it.
+  - name: liveness_check
+    cron: "*/5 * * * *"
+    prompt: |
+      Verify the local LAMP stack is healthy. Use the shell tool only;
+      no human in the loop, do not ask clarifying questions — discover
+      via `ps`, `systemctl`, `curl`, `mysqladmin ping`.
+
+      Checks (in this order — short-circuit on first hard failure):
+        1. apache2 is running. If not: `systemctl restart apache2`,
+           verify, report. If restart fails, escalate (notify) and stop.
+        2. mysql is running and accepting connections
+           (`mysqladmin ping` returns "alive"). If down: restart mysql,
+           verify, report. If restart fails — DO NOT touch /etc/mysql or
+           data files — escalate and stop.
+        3. For each site listed below, `curl -sk -o /dev/null
+           -w "%{http_code}" -m 8 https://<site>/`. Anything not 2xx/3xx
+           for two consecutive runs (check state at /var/lib/agent-ops/
+           last-status.json — create if missing): try
+           `systemctl reload apache2`, re-check, report.
+
+      SITES="lechaletsuisse.co.nz alzora.co.nz ursacorp.co.nz"
+
+      Report exactly one line per check: "<check>: <ok|fixed|failed>: <evidence>".
+      Notification: if anything escalates, shell-out to your notify CLI
+      (e.g. `zibby workflow trigger $AGENT_OPS_NOTIFY_WORKFLOW_ID
+      --input severity=high --input msg="<one-line>"`). No CLI installed
+      → just log; the operator will see it on `agent-ops logs`.
+    tools: [shell]
+
+  # ─── Hourly: deeper system health (memory, disk, CPU, slow queries) ─
+  - name: system_health
+    cron: "0 * * * *"
+    prompt: |
+      Diagnose the host's vital signs and self-heal common housekeeping
+      issues. Autonomous mode — no questions.
+
+      Inspect (read-only first, then act):
+        - `free -m`. If MemAvailable < 80 MB AND mysql is the largest
+          process: `systemctl restart mysql` (free RAM through cache flush).
+        - `df -h /`. If / >= 90% used: rotate Apache logs
+          (`logrotate -f /etc/logrotate.d/apache2`), purge
+          /var/cache/apt/archives via `apt-get clean`. If still >= 85%,
+          enumerate the top 10 largest directories under /var/www/*/wp-content
+          (wp-content/uploads, wp-content/cache, wc-logs) and REPORT —
+          do not delete WordPress user data without escalation.
+        - `top -bn1 | head -20`. If a single PHP-FPM/apache2 worker is
+          > 80% CPU for the snapshot, capture its PID + cmdline and
+          `kill -TERM` it. Apache will respawn. Log what you killed.
+        - `mysqladmin processlist` filtered for "Sleep > 600": kill those
+          connections (`mysqladmin kill <id>`), they're abandoned PHP-FPM.
+        - `mysqladmin extended-status | grep -E "Threads_connected|max_used_connections"`.
+          If Threads_connected > 80% of max_connections, ALERT — don't
+          tune /etc/mysql/* automatically (data risk).
+
+      Report one line per check + any actions taken. Notify on any
+      action OR any unresolved high-severity finding.
+    tools: [shell]
+
+  # ─── Daily 02:30: backup + cert + WP integrity ──────────────────────
+  - name: daily_audit
+    cron: "30 2 * * *"
+    model: claude-sonnet-4-6     # reasoning bump for verifier work
+    prompt: |
+      Daily audit. Autonomous, no questions.
+
+      Backup verification:
+        - List newest mysqldump under /var/backups/mysql/ (or wherever
+          configured — check /etc/cron.daily/ and /etc/crontab for the
+          backup job to learn the path).
+        - Fail if newest dump is older than 26 hours OR smaller than 1 MB.
+        - Spot-check: `gunzip -t <newest>.gz` succeeds (or `tar tzf`).
+
+      SSL cert renewal:
+        - `certbot certificates 2>&1` — for each cert with `VALID:
+          <days>` < 21, run `certbot renew --quiet --post-hook
+          "systemctl reload apache2"` and re-verify. Report which renewed.
+
+      WordPress core file integrity (lightweight):
+        - For each site under /var/www/<name>/, verify `wp-config.php`
+          mode is 640 or stricter and owner is `www-data` (or whatever
+          your install uses; `stat -c "%a %U" wp-config.php`).
+        - List any new files under wp-content/uploads/ with PHP extension
+          (`find /var/www/*/wp-content/uploads -name "*.php" -newer
+          /var/log/agent-ops/.last-php-scan 2>/dev/null`). PHP under
+          uploads = almost certainly a compromise. Notify + DO NOT delete.
+
+      Report findings + actions. Notify on any failure or compromise.
+    tools: [shell]
+
+  # ─── Weekly Sunday 04:00: security updates ──────────────────────────
+  # Conservative: ONLY security-marked updates, never full dist-upgrade.
+  # Reboot left to operator — kernel update flag triggers a notify, not
+  # an automatic reboot.
+  - name: weekly_security_patch
+    cron: "0 4 * * 0"
+    model: claude-sonnet-4-6
+    prompt: |
+      Apply Ubuntu security updates ONLY. Autonomous, conservative.
+
+      Steps:
+        1. `apt-get update`.
+        2. `apt list --upgradable 2>/dev/null | grep -i "\-security"`.
+           If none: report "no security updates" and stop.
+        3. Snapshot package list to /var/log/agent-ops/pre-patch-$(date +%F).list.
+        4. `apt-get -y -o Dpkg::Options::="--force-confold" upgrade \
+              $(apt list --upgradable 2>/dev/null | grep -i "\-security" \
+              | awk -F/ '{print $1}')`.
+        5. Restart Apache + MySQL (`systemctl restart apache2 mysql`),
+           verify via the same liveness checks (`curl` + `mysqladmin ping`).
+           If anything broken: report stack trace + STOP, do NOT roll back
+           automatically — escalate to operator.
+        6. If `/var/run/reboot-required` exists: notify operator with
+           "reboot required for kernel update — schedule via `agent-ops
+           schedule run reboot`". Do NOT reboot automatically.
+    tools: [shell]

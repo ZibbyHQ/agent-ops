@@ -114,8 +114,27 @@ writable? MCP port free? upstream LLM reachable?)
 ## Quickstart: WordPress + MySQL health monitoring
 
 A concrete scenario — agent-ops keeps a small WordPress install
-self-healing. After `apt install mysql-server wordpress nginx` (or your
-playbook of choice), drop this at `/etc/agent-ops/config.yaml`:
+self-healing.
+
+The full, copy-pasteable config for a real-world WordPress + Apache + MySQL
+host (multiple sites, 1 GB RAM, WooCommerce-friendly) lives at
+[`examples/wordpress-multisite.yaml`](examples/wordpress-multisite.yaml).
+That example covers all of:
+
+- 5-minute liveness check on Apache + MySQL + per-site `curl`, auto-restart
+  on OOM
+- Hourly system housekeeping (memory, disk, runaway PHP-FPM workers,
+  abandoned MySQL connections, log rotation)
+- Daily 02:30 audit (mysqldump freshness, Let's Encrypt cert renewal,
+  WordPress file integrity — flags suspicious PHP under uploads)
+- Weekly security patches (ubuntu `-security` only, conservative)
+
+Copy it in place of `config.yaml`, edit the `SITES=` / `DBS=` lines for
+your domains, `agent-ops restart`. Done.
+
+Below is the minimal stripped-down equivalent for a single-app host (drop
+this at `/etc/agent-ops/config.yaml` if you don't need the multi-site
+machinery):
 
 ```yaml
 state_dir: /var/lib/agent-ops
