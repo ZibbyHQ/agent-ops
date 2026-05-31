@@ -5,11 +5,11 @@ bin/
 *.so
 *.dylib
 
-# goreleaser output dir — everything under dist/ is generated EXCEPT the
-# checked-in APT signing-key payload (scripts/publish-apt.mjs reads it
-# from dist/apt/ and uploads it to dl.zibby.app/apt/key.gpg).
-dist/*
-!dist/apt/
+# goreleaser output dir — everything under dist/ is generated. The APT
+# signing-key payload lives at apt/key.gpg (outside dist/) so
+# `goreleaser release --clean` can wipe dist/ without leaving the tree
+# in a "dirty" state. publish-apt.mjs reads from apt/key.gpg.
+dist/
 
 # Test artifacts
 *.test

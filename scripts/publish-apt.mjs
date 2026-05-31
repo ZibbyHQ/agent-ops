@@ -80,8 +80,8 @@
 //        --description "Armored private key used to sign dl.zibby.app/apt Release metadata" \
 //        --secret-string file://zibby-apt-private.asc
 // 4. Export the public key for users to download:
-//      gpg --armor --export "Zibby APT Signing" > dist/apt/key.gpg
-//    Commit dist/apt/key.gpg to the agent-ops repo so it ships with the
+//      gpg --armor --export "Zibby APT Signing" > apt/key.gpg
+//    Commit apt/key.gpg to the agent-ops repo so it ships with the
 //    source. This script also re-uploads it on every run (idempotent) so
 //    the dl.zibby.app/apt/key.gpg URL stays in sync.
 // 5. Shred the local copies:
@@ -106,7 +106,7 @@ const DEFAULTS = {
   awsProfile: 'zibby',
   s3SrcPrefix: 'agent-ops',           // where the .deb files live (per-version)
   s3AptPrefix: 'apt',                  // where the APT repo lives
-  publicKeyRepoPath: 'dist/apt/key.gpg',
+  publicKeyRepoPath: 'apt/key.gpg',
   secretsManagerId: '/zibby/prod/apt-signing-key',
   distSuite: 'stable',
   distComponent: 'main',
@@ -552,7 +552,7 @@ async function main() {
     if (!exists(repoKeyPath)) {
       log(`\n  WARNING: ${DEFAULTS.publicKeyRepoPath} not present in repo. The dl.zibby.app/apt/key.gpg URL won't be updated.`);
       log('  Operator: generate the key (see comments at top of this script), export public,');
-      log('            and commit to dist/apt/key.gpg.');
+      log('            and commit to apt/key.gpg.');
     } else {
       // Refuse to upload the placeholder marker — operator hasn't replaced it yet.
       const firstBytes = fs.readFileSync(repoKeyPath, 'utf8').slice(0, 64);
