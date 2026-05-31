@@ -11,19 +11,21 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ZibbyHQ/agent-ops/internal/driver"
 )
 
-// `errors` removed — only used by the deleted nilOrNot helper.
-
 // fakeClaudeCLI writes a shell script in tmpDir that, when invoked,
-// emits `stdoutJSON` to stdout, `stderrText` to stderr, then exits with
-// `exitCode`. The script ignores its argv — tests inspect args via
-// argsFile if they need to verify the driver passed the right flags.
+// emits `stdoutNDJSON` to stdout, `stderrText` to stderr, then exits
+// with `exitCode`. The script ignores its argv — tests inspect args
+// via argsFile if they need to verify the driver passed the right flags.
+//
+// stdoutNDJSON is expected to be one JSON event per line
+// (--output-format=stream-json shape) — pass an empty string to skip.
 //
 // Returns the absolute path to the fake binary (set on Driver.Binary).
-func fakeClaudeCLI(t *testing.T, stdoutJSON, stderrText string, exitCode int) string {
+func fakeClaudeCLI(t *testing.T, stdoutNDJSON, stderrText string, exitCode int) string {
 	t.Helper()
 	tmpDir := t.TempDir()
 	script := filepath.Join(tmpDir, "claude")
@@ -31,8 +33,8 @@ func fakeClaudeCLI(t *testing.T, stdoutJSON, stderrText string, exitCode int) st
 	if stderrText != "" {
 		body += "cat >&2 <<'EOF_STDERR'\n" + stderrText + "\nEOF_STDERR\n"
 	}
-	if stdoutJSON != "" {
-		body += "cat <<'EOF_STDOUT'\n" + stdoutJSON + "\nEOF_STDOUT\n"
+	if stdoutNDJSON != "" {
+		body += "cat <<'EOF_STDOUT'\n" + stdoutNDJSON + "\nEOF_STDOUT\n"
 	}
 	body += "exit " + intToStr(exitCode) + "\n"
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
@@ -100,16 +102,43 @@ func findRecord(t *testing.T, records []map[string]any, msgPrefix string) map[st
 	return nil
 }
 
+// findAllRecords returns every log record whose msg matches msgPrefix
+// (in insertion order). Used by per-turn tests that expect MANY matches.
+func findAllRecords(records []map[string]any, msgPrefix string) []map[string]any {
+	var out []map[string]any
+	for _, r := range records {
+		if m, ok := r["msg"].(string); ok && strings.HasPrefix(m, msgPrefix) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// ndjsonResult is a convenience for tests: produces a single-line
+// {"type":"result"} NDJSON event with the given fields.
+func ndjsonResult(result string, numTurns int, costUSD float64, isError bool) string {
+	r := map[string]any{
+		"type":           "result",
+		"subtype":        "success",
+		"result":         result,
+		"num_turns":      numTurns,
+		"total_cost_usd": costUSD,
+		"is_error":       isError,
+	}
+	b, _ := json.Marshal(r)
+	return string(b)
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────
 
 func TestRun_SuccessLogsConversation(t *testing.T) {
-	// Claude CLI's `--output-format json` post-run JSON. The driver
-	// parses this AND (post-Wave-B-log-fix) emits a structured slog
-	// record so the conversation is visible in CloudWatch.
-	stdoutJSON := `{"result":"n8n responded HTTP 200 on port 5678","total_cost_usd":0.0042,"num_turns":3,"is_error":false}`
-	bin := fakeClaudeCLI(t, stdoutJSON, "", 0)
+	// Driver consumes the stream-json NDJSON event stream now (0.3.3+).
+	// Only the terminal {"type":"result"} event populates Driver.Result;
+	// intermediate events drive the per-turn progress log.
+	stdoutNDJSON := ndjsonResult("n8n responded HTTP 200 on port 5678", 3, 0.0042, false)
+	bin := fakeClaudeCLI(t, stdoutNDJSON, "", 0)
 	logBuf := captureLog(t)
 
 	d := &Driver{Binary: bin}
@@ -143,9 +172,9 @@ func TestRun_SuccessLogsConversation(t *testing.T) {
 		t.Errorf("spawning log max_turns = %v, want 5", spawn["max_turns"])
 	}
 
-	// 3. NEW: conversation-complete log is emitted with prompt + result
-	//    + cost. This is the fix the user asked for — without this log,
-	//    Claude's response is invisible outside the container.
+	// 3. conversation-complete log is emitted with prompt + result
+	//    + cost. Without this log, Claude's response is invisible
+	//    outside the container.
 	convo := findRecord(t, records, "claudecli: conversation complete")
 	if !strings.Contains(convo["user_prompt"].(string), "Curl localhost:5678") {
 		t.Errorf("user_prompt missing in convo log: %v", convo["user_prompt"])
@@ -174,8 +203,8 @@ func TestRun_TruncatesLongFields(t *testing.T) {
 	// system/user/result/stderr. CloudWatch event ceiling is 256KB so
 	// worst-case ~21KB is well under budget.
 	longResult := strings.Repeat("x", 16000)
-	stdoutJSON := `{"result":"` + longResult + `","total_cost_usd":0,"num_turns":1,"is_error":false}`
-	bin := fakeClaudeCLI(t, stdoutJSON, "", 0)
+	stdoutNDJSON := ndjsonResult(longResult, 1, 0, false)
+	bin := fakeClaudeCLI(t, stdoutNDJSON, "", 0)
 	logBuf := captureLog(t)
 
 	d := &Driver{Binary: bin}
@@ -226,10 +255,10 @@ func TestRun_SubprocessFailure_LogsStderrAndReturnsError(t *testing.T) {
 }
 
 func TestRun_UnparsableStdout_FallsBackAndLogsWarning(t *testing.T) {
-	// If Claude CLI's output format changes (new fields, missing top-
-	// level keys), the driver returns the raw bytes as FinalMessage but
-	// shouldn't crash. Also: emit a Warn slog so operators see it before
-	// users start filing tickets.
+	// If Claude CLI's output format changes (new event types, missing
+	// terminal result event), the driver returns the raw bytes as
+	// FinalMessage but shouldn't crash. Also: emit a Warn slog so
+	// operators see it before users start filing tickets.
 	bin := fakeClaudeCLI(t, "not json at all", "", 0)
 	logBuf := captureLog(t)
 
@@ -238,15 +267,17 @@ func TestRun_UnparsableStdout_FallsBackAndLogsWarning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
-	if res.FinalMessage != "not json at all" {
+	if !strings.Contains(res.FinalMessage, "not json at all") {
 		t.Errorf("FinalMessage should fall back to raw stdout; got %q", res.FinalMessage)
 	}
 	if res.Error == "" {
 		t.Error("Error should be set on parse failure")
 	}
-	warn := findRecord(t, logRecords(t, logBuf), "claudecli: stdout parse failed")
+	// Stream ended without a result event — driver emits the
+	// "no result event in stream" warning.
+	warn := findRecord(t, logRecords(t, logBuf), "claudecli: no result event")
 	if !strings.Contains(warn["raw"].(string), "not json") {
-		t.Errorf("parse-fail warn log missing raw stdout: %v", warn["raw"])
+		t.Errorf("no-result-event warn log missing raw stdout: %v", warn["raw"])
 	}
 }
 
@@ -259,5 +290,176 @@ func TestRun_BinaryNotFound_ReturnsError(t *testing.T) {
 	res, err := d.Run(context.Background(), driver.Request{UserPrompt: "x"})
 	if err == nil && res.Error == "" {
 		t.Error("expected an error path when binary is missing, got success")
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Per-turn progress (0.3.3 new behaviour)
+// ─────────────────────────────────────────────────────────────────────
+
+// realisticStream is the NDJSON event sequence the bundled Claude Code
+// CLI 2.1.158 actually emits for a 3-turn run (verified by hand-piping
+// `claude --print "run 'echo hi' via Bash then 'pwd' via Bash"
+// --output-format=stream-json --verbose`). Used to assert the parser
+// emits one "claudecli: turn" per assistant message + one
+// "claudecli: tool_result" per tool_result.
+const realisticStream = `{"type":"system","subtype":"init","cwd":"/x","session_id":"s1","model":"claude-opus-4-8","permissionMode":"acceptEdits","claude_code_version":"2.1.158"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I'll run both commands."}]},"session_id":"s1"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_A","name":"Bash","input":{"command":"echo hi"}}]},"session_id":"s1"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_B","name":"Read","input":{"file_path":"/etc/hosts"}}]},"session_id":"s1"}
+{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_A","type":"tool_result","content":"hi","is_error":false}]},"session_id":"s1"}
+{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_B","type":"tool_result","content":"127.0.0.1 localhost","is_error":false}]},"session_id":"s1"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done."}]},"session_id":"s1"}
+{"type":"result","subtype":"success","is_error":false,"num_turns":4,"result":"Done.","total_cost_usd":0.057,"session_id":"s1"}`
+
+func TestRun_PerTurnProgressLogged(t *testing.T) {
+	// The whole point of 0.3.3: operators watching CloudWatch see
+	// per-turn progress during long installs. Assert one "claudecli:
+	// turn" record per assistant message + one "claudecli: tool_result"
+	// per tool_result, with the right field names ops will grep on:
+	// n, max, tool, elapsed_ms.
+	bin := fakeClaudeCLI(t, realisticStream, "", 0)
+	logBuf := captureLog(t)
+
+	d := &Driver{Binary: bin}
+	res, err := d.Run(context.Background(), driver.Request{
+		UserPrompt:   "run echo hi and read /etc/hosts",
+		MaxToolCalls: 25,
+	})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if res.Error != "" {
+		t.Fatalf("unexpected Result.Error: %q", res.Error)
+	}
+
+	records := logRecords(t, logBuf)
+
+	turns := findAllRecords(records, "claudecli: turn")
+	// 4 assistant messages in the stream → 4 turn records.
+	if len(turns) != 4 {
+		t.Fatalf("expected 4 turn records, got %d", len(turns))
+	}
+
+	// Field shape check on the first turn.
+	first := turns[0]
+	if first["n"] != float64(1) {
+		t.Errorf("turn[0].n = %v, want 1", first["n"])
+	}
+	if first["max"] != float64(25) {
+		t.Errorf("turn[0].max = %v, want 25", first["max"])
+	}
+	if _, ok := first["elapsed_ms"]; !ok {
+		t.Errorf("turn[0] missing elapsed_ms")
+	}
+	if first["text"] != "I'll run both commands." {
+		t.Errorf("turn[0].text = %v, want \"I'll run both commands.\"", first["text"])
+	}
+
+	// Second turn: tool_use Bash.
+	if turns[1]["tool"] != "Bash" {
+		t.Errorf("turn[1].tool = %v, want Bash", turns[1]["tool"])
+	}
+	// Third turn: tool_use Read.
+	if turns[2]["tool"] != "Read" {
+		t.Errorf("turn[2].tool = %v, want Read", turns[2]["tool"])
+	}
+
+	// tool_result records (2 in this stream).
+	results := findAllRecords(records, "claudecli: tool_result")
+	if len(results) != 2 {
+		t.Fatalf("expected 2 tool_result records, got %d", len(results))
+	}
+	if results[0]["tool"] != "Read" {
+		// last_tool at the time the first result arrives = the most-
+		// recent assistant tool_use, which is Read (the Bash call was
+		// followed by a Read call before either result was returned).
+		t.Errorf("tool_result[0].tool = %v, want Read (last_tool tracking)", results[0]["tool"])
+	}
+	if results[0]["output"] != "hi" {
+		t.Errorf("tool_result[0].output = %v, want hi", results[0]["output"])
+	}
+	if results[0]["is_error"] != false {
+		t.Errorf("tool_result[0].is_error = %v, want false", results[0]["is_error"])
+	}
+
+	// Final result is still parsed correctly.
+	if res.FinalMessage != "Done." {
+		t.Errorf("FinalMessage = %q, want Done.", res.FinalMessage)
+	}
+	if res.ToolCalls != 4 {
+		t.Errorf("ToolCalls = %d, want 4", res.ToolCalls)
+	}
+	if res.CostUSDMicro != int64(57000) {
+		t.Errorf("CostUSDMicro = %d, want 57000 (0.057 * 1e6)", res.CostUSDMicro)
+	}
+}
+
+func TestParseStream_DefaultsMaxTurnsForLog(t *testing.T) {
+	// When the caller doesn't set MaxToolCalls, the per-turn log should
+	// show "max=25" (CLI default) — not "max=0". That's what makes
+	// "turn N/25" actually informative.
+	bin := fakeClaudeCLI(t, realisticStream, "", 0)
+	logBuf := captureLog(t)
+
+	d := &Driver{Binary: bin}
+	if _, err := d.Run(context.Background(), driver.Request{UserPrompt: "x"}); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	turns := findAllRecords(logRecords(t, logBuf), "claudecli: turn")
+	if len(turns) == 0 {
+		t.Fatal("expected at least one turn record")
+	}
+	if turns[0]["max"] != float64(defaultMaxTurns) {
+		t.Errorf("default max in turn log = %v, want %d", turns[0]["max"], defaultMaxTurns)
+	}
+}
+
+// TestParseStream_DirectlyOnNDJSON exercises parseStream against a
+// crafted NDJSON sample without spawning a subprocess. Faster + easier
+// to assert ordering / sliding-tail behaviour on.
+func TestParseStream_DirectlyOnNDJSON(t *testing.T) {
+	logBuf := captureLog(t)
+	out, err := parseStream(strings.NewReader(realisticStream), 25, time.Now())
+	if err != nil {
+		t.Fatalf("parseStream err: %v", err)
+	}
+	if out.result == nil {
+		t.Fatal("expected result populated")
+	}
+	if out.result.Result != "Done." {
+		t.Errorf("result.Result = %q", out.result.Result)
+	}
+	if out.eventCount != 8 {
+		t.Errorf("eventCount = %d, want 8", out.eventCount)
+	}
+	turns := findAllRecords(logRecords(t, logBuf), "claudecli: turn")
+	if len(turns) != 4 {
+		t.Errorf("turn log count = %d, want 4", len(turns))
+	}
+}
+
+// TestParseStream_HandlesUnknownEventTypes ensures forward-compat: a
+// future CLI version adding new {"type":...} events should not break
+// parsing or the per-turn log.
+func TestParseStream_HandlesUnknownEventTypes(t *testing.T) {
+	stream := strings.Join([]string{
+		`{"type":"system","subtype":"init"}`,
+		`{"type":"future_event_added_in_3_0","payload":"whatever"}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}`,
+		`{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"ok","total_cost_usd":0.001}`,
+	}, "\n")
+
+	logBuf := captureLog(t)
+	out, err := parseStream(strings.NewReader(stream), 25, time.Now())
+	if err != nil {
+		t.Fatalf("parseStream err: %v", err)
+	}
+	if out.result == nil || out.result.Result != "ok" {
+		t.Errorf("result not parsed; got %+v", out.result)
+	}
+	turns := findAllRecords(logRecords(t, logBuf), "claudecli: turn")
+	if len(turns) != 1 {
+		t.Errorf("turn count = %d, want 1 (unknown event should be ignored)", len(turns))
 	}
 }
