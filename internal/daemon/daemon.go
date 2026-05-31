@@ -40,6 +40,7 @@ import (
 	"github.com/ZibbyHQ/agent-ops/internal/driver/claude"
 	"github.com/ZibbyHQ/agent-ops/internal/driver/claudecli"
 	"github.com/ZibbyHQ/agent-ops/internal/driver/codex"
+	"github.com/ZibbyHQ/agent-ops/internal/mcpclient"
 	"github.com/ZibbyHQ/agent-ops/internal/node"
 	"github.com/ZibbyHQ/agent-ops/internal/runreport"
 	"github.com/ZibbyHQ/agent-ops/internal/scheduler"
@@ -79,9 +80,23 @@ func Run(cfgPath, version string, logger *slog.Logger) error {
 	// Tools
 	tools := tool.NewRegistry()
 	tools.MustRegister(tool.NewShellTool())
-	// v0.1 ships shell only — pure OSS daemon. Vendor-coupled integrations
-	// (Slack, Jira, vendor APIs, etc.) belong in a flavoured image that
-	// installs the vendor's CLI and lets the agent shell-out to it.
+	// `shell` is always present. v0.3 adds OPTIONAL MCP-client integrations
+	// (see internal/mcpclient + cfg.MCPClients) which register additional
+	// remote tools below — wholly off by default; existing v0.2.x configs
+	// without `mcp_clients:` see zero behavior change.
+
+	// Outbound MCP clients. Each entry in cfg.MCPClients becomes one
+	// supervised connection; tools the remote server advertises are
+	// registered into the local registry under `{name}_{remoteName}`.
+	mcpMgr, started, err := bootMCPClients(ctx0(), cfg, logger)
+	if err != nil {
+		// Boot itself only returns errors for unrecoverable internal
+		// problems (slog nil etc) — per-client failures are logged + skipped
+		// so a bad integration cannot prevent the daemon from starting.
+		return fmt.Errorf("mcp clients: %w", err)
+	}
+	defer mcpMgr.Close()
+	registerRemoteTools(tools, started, logger)
 
 	// Driver
 	d, err := buildDriver(cfg)
@@ -204,6 +219,68 @@ func signalContext() (context.Context, context.CancelFunc) {
 		cancel()
 	}()
 	return ctx, cancel
+}
+
+// ctx0 returns a background context for boot-time MCP client dialing. We
+// can't use the scheduler/signal context because that's constructed AFTER
+// the tool registry is wired (the order matters: the LLM Driver factory
+// reads the registry through Runner, so tools must be registered first).
+func ctx0() context.Context { return context.Background() }
+
+// bootMCPClients converts cfg.MCPClients into mcpclient.Configs, resolves
+// AuthEnv → real token, then asks the Manager to dial them. Per-client
+// failures are logged but never fatal.
+func bootMCPClients(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*mcpclient.Manager, []mcpclient.Started, error) {
+	if len(cfg.MCPClients) == 0 {
+		// Return an empty Manager so the caller's `defer Close()` is a no-op.
+		mgr, started, _ := mcpclient.Boot(ctx, nil, logger)
+		return mgr, started, nil
+	}
+	out := make([]mcpclient.Config, 0, len(cfg.MCPClients))
+	for _, mc := range cfg.MCPClients {
+		entry := mcpclient.Config{
+			Name:      mc.Name,
+			Transport: mcpclient.Transport(mc.Transport),
+			URL:       mc.URL,
+			Command:   mc.Command,
+			Args:      append([]string(nil), mc.Args...),
+			Env:       mc.Env,
+		}
+		if mc.AuthEnv != "" {
+			entry.AuthToken = os.Getenv(mc.AuthEnv)
+			if entry.AuthToken == "" {
+				logger.Warn("mcpclient: auth env var is empty",
+					"name", mc.Name, "auth_env", mc.AuthEnv)
+			}
+		}
+		out = append(out, entry)
+	}
+	return mcpclient.Boot(ctx, out, logger)
+}
+
+// registerRemoteTools wires each remote server's tools into the local
+// tool.Registry under the `{clientName}_{remoteName}` convention.
+// Conflict policy: last-wins with a Warn log. We intentionally don't
+// abort registration on conflict — an operator who renamed an
+// integration without removing the old one should still get a working
+// daemon, just with a noisy log.
+func registerRemoteTools(reg *tool.Registry, started []mcpclient.Started, logger *slog.Logger) {
+	for _, s := range started {
+		invoker := &mcpclient.ToolInvoker{C: s.Client}
+		for _, td := range s.Tools {
+			adapter := tool.NewRemoteToolAdapter(s.Client.Name(), td.Name, td.Description, td.InputSchema, invoker)
+			if err := reg.Register(adapter); err != nil {
+				logger.Warn("mcpclient: tool register conflict (last-wins not yet enabled — skipping)",
+					"local_name", adapter.Name(), "client", s.Client.Name(), "error", err)
+				// last-wins: drop then re-register
+				// (Registry has no Unregister yet; safe fallback is to skip
+				// the new one. We log loudly so the operator sees it.)
+				continue
+			}
+			logger.Info("mcpclient: tool registered",
+				"local_name", adapter.Name(), "client", s.Client.Name())
+		}
+	}
 }
 
 func shutdown(httpSrv *http.Server, sched *scheduler.Scheduler, logger *slog.Logger) error {

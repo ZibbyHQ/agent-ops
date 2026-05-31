@@ -41,6 +41,19 @@ type Config struct {
 	// MCP configures the streamable-HTTP MCP server exposed to remote agents.
 	MCP MCPConfig `yaml:"mcp"`
 
+	// MCPClients is the list of OUTBOUND MCP servers the daemon dials at
+	// boot (see internal/mcpclient). For each entry the daemon connects,
+	// runs tools/list, and registers each discovered tool into the local
+	// tool registry under the name `{Name}_{remoteToolName}`. The LLM
+	// driving scheduled tasks then sees those remote tools alongside the
+	// built-in `shell`. Empty / unset → daemon runs in pure OSS mode with
+	// only `shell` available (back-compat with v0.2.x).
+	//
+	// Each entry is appended-to / removed-from atomically via
+	// `agent-ops integrate add | remove` (and the matching MCP tools), so
+	// operators don't have to hand-edit YAML to wire up an integration.
+	MCPClients []MCPClientConfig `yaml:"mcp_clients,omitempty"`
+
 	// Reserved namespaces — kept here so config files written for v0.1
 	// don't reject unknown top-level keys when v0.2 adds these. The fields
 	// are intentionally not parsed yet; the loader emits a warning.
@@ -97,6 +110,46 @@ type Schedule struct {
 	VerifyModel string `yaml:"verify_model,omitempty"`
 
 	Enabled *bool `yaml:"enabled,omitempty"`
+}
+
+// MCPClientConfig is one outbound MCP client entry in `mcp_clients:`. The
+// daemon dials each entry at boot and exposes the discovered remote tools
+// to the local LLM under the prefix `{Name}_`.
+//
+// Two transports are supported, picked by Transport:
+//   - "http":  AuthEnv names an env var holding a Bearer token. URL is the
+//     full /mcp endpoint (e.g. https://api-prod.zibby.app/mcp).
+//   - "stdio": Command + Args are exec'd; the daemon talks JSON-RPC over
+//     stdin/stdout. Env supplies extra environment for the subprocess.
+//
+// Secrets live in /etc/agent-ops/agent-ops.env (mode 0600), NOT in this
+// file — AuthEnv resolves to whatever the operator (or `integrate add`)
+// wrote into that env file. This keeps config.yaml diffable + commit-safe.
+type MCPClientConfig struct {
+	// Name uniquely identifies the integration. Used as the local tool-name
+	// prefix and as the key for `integrate remove`.
+	Name string `yaml:"name"`
+
+	// Transport selects "http" or "stdio".
+	Transport string `yaml:"transport"`
+
+	// URL is the MCP endpoint (transport=http only).
+	URL string `yaml:"url,omitempty"`
+
+	// Command is the executable to spawn (transport=stdio only).
+	Command string `yaml:"command,omitempty"`
+
+	// Args are the argv after Command (transport=stdio only).
+	Args []string `yaml:"args,omitempty"`
+
+	// AuthEnv names the env var holding the Bearer token (http only). The
+	// daemon resolves this at boot via os.Getenv; never load a literal
+	// token into YAML.
+	AuthEnv string `yaml:"auth_env,omitempty"`
+
+	// Env supplies extra environment for the subprocess (stdio only).
+	// Layered on top of the daemon's inherited env.
+	Env map[string]string `yaml:"env,omitempty"`
 }
 
 // MCPConfig drives the agent-ops MCP server.
@@ -252,6 +305,33 @@ func (c *Config) validate() error {
 		}
 		if strings.TrimSpace(c.Bootstrap.Prompt) == "" {
 			return errors.New("config: bootstrap.prompt is required")
+		}
+	}
+
+	// MCPClients validation — defence against typo'd transport or missing
+	// transport-required fields. We do NOT validate that AuthEnv resolves
+	// at parse time, because env may legitimately be loaded after the
+	// daemon process starts (systemd EnvironmentFile=…).
+	clientNames := map[string]struct{}{}
+	for i, mc := range c.MCPClients {
+		if strings.TrimSpace(mc.Name) == "" {
+			return fmt.Errorf("config: mcp_clients[%d].name is required", i)
+		}
+		if _, dup := clientNames[mc.Name]; dup {
+			return fmt.Errorf("config: mcp_clients[%d].name %q is a duplicate", i, mc.Name)
+		}
+		clientNames[mc.Name] = struct{}{}
+		switch mc.Transport {
+		case "http":
+			if strings.TrimSpace(mc.URL) == "" {
+				return fmt.Errorf("config: mcp_clients[%d] (%s): http transport requires url", i, mc.Name)
+			}
+		case "stdio":
+			if strings.TrimSpace(mc.Command) == "" {
+				return fmt.Errorf("config: mcp_clients[%d] (%s): stdio transport requires command", i, mc.Name)
+			}
+		default:
+			return fmt.Errorf("config: mcp_clients[%d] (%s): transport %q is not one of http|stdio", i, mc.Name, mc.Transport)
 		}
 	}
 	return nil

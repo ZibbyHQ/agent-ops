@@ -140,6 +140,7 @@ func TestToolsList_ContainsAllBuiltinsAndHostTools(t *testing.T) {
 	for _, want := range []string{
 		"agent_status", "agent_run_now", "agent_history", "agent_logs",
 		"agent_list_tasks", "agent_get_task", "agent_set_task",
+		"agent_integrate_add", "agent_integrate_remove", "agent_integrate_list",
 		"host_shell",
 	} {
 		if _, ok := names[want]; !ok {

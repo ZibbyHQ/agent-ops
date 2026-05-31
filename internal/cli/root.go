@@ -19,8 +19,12 @@
 //	├── schedule
 //	│   ├── list
 //	│   └── run <name>
-//	└── mcp
-//	    └── token
+//	├── mcp
+//	│   └── token
+//	└── integrate
+//	    ├── add
+//	    ├── remove
+//	    └── list
 package cli
 
 import (
@@ -67,6 +71,7 @@ talk to that daemon — they do NOT spawn one transiently.`,
 		newUninstallCmd(),
 		newScheduleCmd(),
 		newMCPCmd(),
+		newIntegrateCmd(),
 	)
 	return root
 }

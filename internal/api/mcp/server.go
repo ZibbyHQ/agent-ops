@@ -383,6 +383,12 @@ func (s *Server) handleToolsCall(w http.ResponseWriter, ctx context.Context, req
 		s.toolGetTemplate(w, req.ID, params.Arguments)
 	case "agent_apply_template":
 		s.toolApplyTemplate(w, req.ID, params.Arguments)
+	case "agent_integrate_add":
+		s.toolIntegrateAdd(w, req.ID, params.Arguments)
+	case "agent_integrate_remove":
+		s.toolIntegrateRemove(w, req.ID, params.Arguments)
+	case "agent_integrate_list":
+		s.toolIntegrateList(w, req.ID)
 	default:
 		writeJSONRPCError(w, req.ID, -32602, "no such tool: "+params.Name)
 	}
@@ -887,6 +893,27 @@ func builtinTools() []builtin {
 			name:        "agent_apply_template",
 			description: "Overwrite the daemon's config.yaml with a bundled template. Always presents the operator with a restart_required:true in the response — the daemon does NOT hot-reload config in v0.2; the operator must `agent-ops restart` for changes to take effect. Set dry_run:true to preview without writing.",
 			schema:      `{"type":"object","properties":{"name":{"type":"string"},"dry_run":{"type":"boolean"}},"required":["name"]}`,
+		},
+		// ── Outbound MCP-client integrations (v0.3) ──────────────────────
+		// These wrap internal/integrate so a remote agent (e.g. the user's
+		// Claude Code) can wire up a NEW outbound MCP server — generally
+		// for notify / ticketing — without SSH'ing in to hand-edit
+		// config.yaml + agent-ops.env. The on-disk write is atomic
+		// (flock + temp+rename + 0600 env file).
+		{
+			name: "agent_integrate_add",
+			description: "Add an outbound MCP-client integration. Atomically appends to config.yaml + writes the secret (token) into agent-ops.env. Tools the remote server advertises become available to the local LLM under the prefix `{name}_{remote_tool_name}` (e.g. integration `zibby` + remote tool `trigger_workflow` → local tool `zibby_trigger_workflow`). Response includes restart_required:true — daemon does NOT hot-reload; caller must `agent-ops restart` or call the matching control-plane API for changes to take effect. Args: name (unique), transport ('http' or 'stdio'), url (http only), command + args (stdio only), auth_env + token (http auth), extra_env (extra KEY=VAL persisted to env file), stdio_env (per-subprocess env, stdio only).",
+			schema: `{"type":"object","properties":{"name":{"type":"string"},"transport":{"type":"string","enum":["http","stdio"]},"url":{"type":"string"},"command":{"type":"string"},"args":{"type":"array","items":{"type":"string"}},"auth_env":{"type":"string"},"token":{"type":"string"},"extra_env":{"type":"object","additionalProperties":{"type":"string"}},"stdio_env":{"type":"object","additionalProperties":{"type":"string"}},"env_file":{"type":"string"}},"required":["name","transport"]}`,
+		},
+		{
+			name:        "agent_integrate_remove",
+			description: "Remove an outbound MCP-client integration by name. Atomically drops the entry from config.yaml + the AuthEnv key from agent-ops.env. Returns restart_required:true. ExtraEnv keys added with `agent_integrate_add` are NOT auto-removed (they may be shared across integrations) — edit agent-ops.env manually if needed.",
+			schema:      `{"type":"object","properties":{"name":{"type":"string"},"env_file":{"type":"string"}},"required":["name"]}`,
+		},
+		{
+			name:        "agent_integrate_list",
+			description: "List all configured outbound MCP-client integrations. Secrets are NOT included — only the AuthEnv name is returned so the operator can correlate to their env file.",
+			schema:      `{"type":"object","properties":{}}`,
 		},
 	}
 }

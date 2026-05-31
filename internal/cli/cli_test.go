@@ -56,6 +56,7 @@ func TestRoot_Help(t *testing.T) {
 	for _, want := range []string{
 		"init", "start", "stop", "restart", "status",
 		"logs", "doctor", "uninstall", "schedule", "mcp", "version",
+		"integrate",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("--help missing subcommand %q. Full output:\n%s", want, s)

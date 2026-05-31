@@ -171,10 +171,10 @@ schedules:
       where applicable). No prose. No tables. No markdown headers.
       Aim for under 6 shell turns total.
 
-      Notification: only if a check is "failed" after a recovery
-      attempt AND `command -v zibby >/dev/null`, shell-out once to
-      `zibby workflow trigger $AGENT_OPS_NOTIFY_WORKFLOW_ID
-      --input severity=high --input msg="<failed line>"`.
+      Notification: if a check fails after recovery AND a notify tool
+      is available in your toolbelt (look for names ending in
+      `_trigger_workflow`, `_post_message`, `_create_incident`, etc.),
+      call it with a one-line failure summary. Otherwise just log.
     tools: [shell]
 
   - name: nightly_backup_audit
