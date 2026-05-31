@@ -19,11 +19,11 @@
 #
 # Cost expectations (USD, ANTHROPIC_API_KEY billing):
 #   - discover_stack (Sonnet, once + every 7d):  ~$0.05–0.15 / run
-#   - hourly_health_check (Sonnet, state-driven): ~$0.02–0.05 / run
+#   - liveness_check (Haiku, state-driven, hourly): ~$0.05–0.10 / run
 #   - nightly_backup_audit (Sonnet):              ~$0.05–0.15 / run
 #   - weekly_security_update (Sonnet):            ~$0.10–0.30 / run
-# Typical total: ~$1–3 / day. Bump cadence (e.g. */15 liveness) for
-# tighter MTTR — adds ~$2/day at */15 if you switch to Haiku for it.
+# Typical total: ~$2–4 / day. Bump cadence (e.g. */15 liveness) for
+# tighter MTTR — adds ~$3–5/day at */15.
 #
 # After copying:
 #   1. `sudo agent-ops restart` — discover_stack runs once before
@@ -135,42 +135,46 @@ bootstrap:
   tools: [shell]
 
 schedules:
-  - name: hourly_health_check
+  - name: liveness_check
     cron: "0 * * * *"
     prompt: |
-      Verify the application stack is healthy. Autonomous mode — no
-      questions. Use the shell tool only.
+      Verify the host stack is healthy. Autonomous, use shell tool only.
 
-      Step 0 — state:
-        Read /var/lib/agent-ops/discovered-stack.json. If missing or
-        mtime > 7d old, re-discover the web_server / app / db fields
-        and rewrite the file before continuing.
+      Build ONE shell command that:
+        - reads /var/lib/agent-ops/discovered-stack.json (you can pipe to
+          jq or parse with awk; if jq is absent fall back to grep + sed)
+        - checks `systemctl is-active` for the web server unit + db unit
+        - runs the db's ping command
+        - curls every site in `sites` with a non-empty `url` and captures
+          its HTTP status
+        - prints exactly one line per check:
+            "<check>: <ok|failed>: <one-line evidence>"
 
-      Step 1 — web server: `systemctl is-active <web_server_unit>`
-        should return "active". If not: run `web_restart_cmd` once,
-        re-check, report. If still down, escalate and stop.
+      Run that bash ONCE. Don't break it into multiple turns. Don't
+      reason about the result inside the LLM — just look at the output.
 
-      Step 2 — app process (only if `app_unit` is non-empty):
-        `systemctl is-active <app_unit>`. If down: run
-        `app_restart_cmd` once, re-check.
+      THEN, only if anything reported "failed":
+        - web server failed → `web_restart_cmd` from state, re-check that
+          one check (NOT the whole bash again).
+        - db failed → `systemctl restart <db_unit>`, re-check that one.
+        - a site failed → `web_reload_cmd`, re-check that one site.
+      Each recovery is exactly ONE more shell turn. Append " (recovered)"
+      to its line if it came back to ok. Stop after one recovery attempt
+      per check.
 
-      Step 3 — site URL: `curl -sk -o /dev/null -w "%{http_code}" -m 8
-        <site_url>`. Anything not 2xx/3xx for two consecutive runs
-        (track at /var/lib/agent-ops/last-status.json — create if
-        missing): run `web_reload_cmd`, re-check, report.
+      State file mtime > 7 days OR missing → emit one line
+      "discovery: stale" and STOP. The hourly schedule will re-fire and
+      the next system_health run will re-discover; do NOT re-discover
+      inline here (that would blow our budget).
 
-      Step 4 — db (only if `db_unit` is non-empty):
-        `systemctl is-active <db_unit>` should be "active" AND
-        `db_ping_cmd` should report alive. If down: try restart once.
-        DO NOT touch /etc/<engine>/ or data files.
+      Final answer = the line-per-check output (with " (recovered)"
+      where applicable). No prose. No tables. No markdown headers.
+      Aim for under 6 shell turns total.
 
-      Combine commands with `&&` / `;` — aim for ONE shell turn per
-      step. Report one line per check: "<check>: <ok|fixed|failed>:
-      <evidence>".
-
-      Notify on escalation (shell-out to `zibby workflow trigger
-      $AGENT_OPS_NOTIFY_WORKFLOW_ID --input severity=high --input
-      msg="…"`). If no notify CLI, just log.
+      Notification: only if a check is "failed" after a recovery
+      attempt AND `command -v zibby >/dev/null`, shell-out once to
+      `zibby workflow trigger $AGENT_OPS_NOTIFY_WORKFLOW_ID
+      --input severity=high --input msg="<failed line>"`.
     tools: [shell]
 
   - name: nightly_backup_audit

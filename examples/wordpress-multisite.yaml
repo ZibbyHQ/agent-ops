@@ -17,12 +17,12 @@
 # Cost expectations (USD, ANTHROPIC_API_KEY billing — claude-cli /
 # subscription billing varies):
 #   - discover_stack (Sonnet, runs once + every 7d):  ~$0.05–0.15 / run
-#   - liveness_check (Haiku, state-driven, */15 cadence): ~$0.01–0.03 / run
+#   - liveness_check (Haiku, state-driven, hourly):   ~$0.05–0.10 / run
 #   - system_health  (Haiku, hourly):                  ~$0.02–0.05 / run
 #   - daily_audit    (Sonnet):                         ~$0.05–0.15 / run
 #   - weekly_security_patch (Sonnet):                  ~$0.10–0.30 / run
-# Typical total at this cadence: $3–8 / day. Drop liveness to */5 if you
-# need faster MTTR — adds another ~$2–3 / day.
+# Typical total at this cadence: ~$2–4 / day. Drop liveness to */15 if
+# you need faster MTTR — adds another ~$3–5 / day.
 #
 # After copying:
 #   1. `sudo agent-ops restart` — the agent will run discover_stack once
@@ -151,54 +151,51 @@ bootstrap:
   tools: [shell]
 
 schedules:
-  # ─── Every 15 minutes: web + DB + per-site liveness with auto-heal ──
+  # ─── Hourly: web + DB + per-site liveness with auto-heal ────────────
   # State-driven — reads /var/lib/agent-ops/discovered-stack.json so the
-  # check is cheap. If state is missing or > 7d old, re-runs discovery
-  # before checking.
+  # check is cheap. If state is missing or > 7d old, re-discovery is
+  # deferred to system_health; this task just bails with "discovery:
+  # stale" rather than blowing the per-run budget.
   - name: liveness_check
-    cron: "*/15 * * * *"
+    cron: "0 * * * *"
     prompt: |
-      Verify the host stack is healthy. Autonomous mode — no questions,
-      use the shell tool only.
+      Verify the host stack is healthy. Autonomous, use shell tool only.
 
-      Step 0 — state file:
-        Read /var/lib/agent-ops/discovered-stack.json. If MISSING, or if
-        its mtime is older than 7 days
-        (`find /var/lib/agent-ops/discovered-stack.json -mtime +7
-        -print 2>/dev/null` returns the path), STOP this check and
-        instead run a quick re-discovery: figure out which web server,
-        which db, and which WordPress sites are present (see the
-        discover_stack task description in your config for the JSON
-        shape) and rewrite the file. Then continue.
+      Build ONE shell command that:
+        - reads /var/lib/agent-ops/discovered-stack.json (you can pipe to
+          jq or parse with awk; if jq is absent fall back to grep + sed)
+        - checks `systemctl is-active` for the web server unit + db unit
+        - runs the db's ping command
+        - curls every site in `sites` with a non-empty `url` and captures
+          its HTTP status
+        - prints exactly one line per check:
+            "<check>: <ok|failed>: <one-line evidence>"
 
-      Step 1 — web server:
-        Use `web_server_unit` from the state file.
-        `systemctl is-active <unit>` should return "active". If not:
-        run `web_restart_cmd` once, re-check, report. If still down,
-        escalate (notify) and stop.
+      Run that bash ONCE. Don't break it into multiple turns. Don't
+      reason about the result inside the LLM — just look at the output.
 
-      Step 2 — database:
-        Use `db_unit` from the state file.
-        `systemctl is-active <db_unit>` should return "active" AND
-        `db_ping_cmd` should report alive. If down: restart the unit
-        once. DO NOT touch /etc/<engine>/ or data files. If restart
-        fails, escalate and stop.
+      THEN, only if anything reported "failed":
+        - web server failed → `web_restart_cmd` from state, re-check that
+          one check (NOT the whole bash again).
+        - db failed → `systemctl restart <db_unit>`, re-check that one.
+        - a site failed → `web_reload_cmd`, re-check that one site.
+      Each recovery is exactly ONE more shell turn. Append " (recovered)"
+      to its line if it came back to ok. Stop after one recovery attempt
+      per check.
 
-      Step 3 — per-site:
-        For each site in the state file's `sites` array with a non-empty
-        `url`: `curl -sk -o /dev/null -w "%{http_code}" -m 8 <url>`.
-        Anything not 2xx/3xx for TWO consecutive runs (track at
-        /var/lib/agent-ops/last-status.json — create if missing, keyed
-        by site name): run `web_reload_cmd`, re-check, report.
+      State file mtime > 7 days OR missing → emit one line
+      "discovery: stale" and STOP. The hourly schedule will re-fire and
+      the next system_health run will re-discover; do NOT re-discover
+      inline here (that would blow our budget).
 
-      Combine commands with `&&` / `;` where safe — aim for ONE shell
-      turn per step. Report exactly one line per check:
-        "<check>: <ok|fixed|failed>: <evidence>"
+      Final answer = the line-per-check output (with " (recovered)"
+      where applicable). No prose. No tables. No markdown headers.
+      Aim for under 6 shell turns total.
 
-      Notification: if anything escalates, shell-out to your notify CLI
-      (e.g. `zibby workflow trigger $AGENT_OPS_NOTIFY_WORKFLOW_ID
-      --input severity=high --input msg="<one-line>"`). No CLI installed
-      → just log; the operator will see it on `agent-ops logs`.
+      Notification: only if a check is "failed" after a recovery
+      attempt AND `command -v zibby >/dev/null`, shell-out once to
+      `zibby workflow trigger $AGENT_OPS_NOTIFY_WORKFLOW_ID
+      --input severity=high --input msg="<failed line>"`.
     tools: [shell]
 
   # ─── Hourly: deeper system health (memory, disk, runaway workers) ───

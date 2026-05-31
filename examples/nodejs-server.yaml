@@ -15,11 +15,11 @@
 #
 # Cost expectations (USD, ANTHROPIC_API_KEY billing):
 #   - discover_stack (Sonnet, once + every 7d):   ~$0.05–0.15 / run
-#   - liveness_check (Haiku, state-driven, */15): ~$0.01–0.03 / run
+#   - liveness_check (Haiku, state-driven, hourly): ~$0.05–0.10 / run
 #   - system_health  (Haiku, hourly):             ~$0.02–0.05 / run
 #   - daily_audit    (Sonnet):                    ~$0.05–0.15 / run
 #   - weekly_security_patch (Sonnet):             ~$0.10–0.30 / run
-# Typical total at this cadence: ~$3–6 / day.
+# Typical total at this cadence: ~$2–4 / day.
 #
 # After copying:
 #   1. `sudo agent-ops restart` — discover_stack runs once before the
@@ -158,45 +158,47 @@ bootstrap:
   tools: [shell]
 
 schedules:
-  # ─── Every 15 minutes: app + reverse-proxy liveness with auto-heal ──
+  # ─── Hourly: app + reverse-proxy liveness with auto-heal ────────────
   - name: liveness_check
-    cron: "*/15 * * * *"
+    cron: "0 * * * *"
     prompt: |
-      Verify the Node.js stack is healthy. Autonomous mode — no
-      questions, shell tool only.
+      Verify the host stack is healthy. Autonomous, use shell tool only.
 
-      Step 0 — state:
-        Read /var/lib/agent-ops/discovered-stack.json. If missing or
-        mtime > 7d old, re-discover (process_manager, apps[*],
-        web_server, site_url) and rewrite the file before continuing.
+      Build ONE shell command that:
+        - reads /var/lib/agent-ops/discovered-stack.json (you can pipe to
+          jq or parse with awk; if jq is absent fall back to grep + sed)
+        - checks `systemctl is-active` for the web server unit + db unit
+        - runs the db's ping command
+        - curls every site in `sites` with a non-empty `url` and captures
+          its HTTP status
+        - prints exactly one line per check:
+            "<check>: <ok|failed>: <one-line evidence>"
 
-      Step 1 — per app, in order:
-        For each entry in `apps`:
-          a. Run its `status_cmd`. Expect "online" (pm2) or "active"
-             (systemd) or "running" (docker). If not: run `restart_cmd`
-             once, wait 5s, re-check. If still not healthy, escalate
-             (notify with the app's `logs_cmd` tail) and stop.
-          b. `ss -ltn | grep ":<app.port> "` — confirm the port is
-             actually listening. If absent after a successful status
-             check, run `restart_cmd`, re-check.
+      Run that bash ONCE. Don't break it into multiple turns. Don't
+      reason about the result inside the LLM — just look at the output.
 
-      Step 2 — reverse proxy (only if `web_server_unit` is non-empty):
-        `systemctl is-active <web_server_unit>` should be "active". If
-        not: `web_restart_cmd`, re-check.
+      THEN, only if anything reported "failed":
+        - web server failed → `web_restart_cmd` from state, re-check that
+          one check (NOT the whole bash again).
+        - db failed → `systemctl restart <db_unit>`, re-check that one.
+        - a site failed → `web_reload_cmd`, re-check that one site.
+      Each recovery is exactly ONE more shell turn. Append " (recovered)"
+      to its line if it came back to ok. Stop after one recovery attempt
+      per check.
 
-      Step 3 — end-to-end: `curl -sk -o /dev/null -w "%{http_code}" -m
-        8 <site_url>`. Anything not 2xx/3xx for two consecutive runs
-        (track at /var/lib/agent-ops/last-status.json — create if
-        missing): run `web_reload_cmd` (if web_server present) OR the
-        first app's `reload_cmd`, re-check, report.
+      State file mtime > 7 days OR missing → emit one line
+      "discovery: stale" and STOP. The hourly schedule will re-fire and
+      the next system_health run will re-discover; do NOT re-discover
+      inline here (that would blow our budget).
 
-      Combine commands with `&&` / `;` — aim for ONE shell turn per
-      step. Report one line per check: "<check>: <ok|fixed|failed>:
-      <evidence>".
+      Final answer = the line-per-check output (with " (recovered)"
+      where applicable). No prose. No tables. No markdown headers.
+      Aim for under 6 shell turns total.
 
-      Notify on escalation: shell-out to `zibby workflow trigger
-      $AGENT_OPS_NOTIFY_WORKFLOW_ID --input severity=high --input
-      msg="…"`. If no CLI, log only.
+      Notification: only if a check is "failed" after a recovery
+      attempt AND `command -v zibby >/dev/null`, shell-out once to
+      `zibby workflow trigger $AGENT_OPS_NOTIFY_WORKFLOW_ID
+      --input severity=high --input msg="<failed line>"`.
     tools: [shell]
 
   # ─── Hourly: deeper system health (memory, disk, crash-loops) ────────

@@ -25,7 +25,7 @@ import (
 )
 
 // version is set via -ldflags by the release pipeline.
-var version = "0.2.1"
+var version = "0.2.2"
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(),
