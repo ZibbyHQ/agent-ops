@@ -53,10 +53,13 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
-          # amd64 only — Fargate prod uses amd64; arm64 multi-arch QEMU
-          # build adds ~5min and was flaking under @anthropic-ai/claude-code
-          # npm install on the arm64 leg. Add arm64 back once we need it.
-          platforms: linux/amd64
+          # Multi-arch: Fargate now supports per-instance ARM64 tasks in the
+          # apps-fleet (see backend/src/handlers/apps.js — `runtimePlatform`
+          # is wired from the catalog's `architectures` field). Cross-arch
+          # build cost is ~3min added by QEMU on the arm64 leg; the Zibby
+          # flavour build downstream (CodeBuild — `zibby-apps-agent-builder-prod`)
+          # depends on this being a manifest list, so don't drop arm64.
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: |
             ghcr.io/zibbyhq/agent-ops:${{ steps.ver.outputs.version }}
